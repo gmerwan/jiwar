@@ -1,0 +1,20 @@
+services:
+  db:
+    image: imresamu/postgis:18-3.6
+    container_name: jiwar_db
+    environment:
+      POSTGRES_USER: jiwar
+      POSTGRES_PASSWORD: jiwar
+      POSTGRES_DB: jiwar_dev
+    ports:
+      - "55432:5432"
+    volumes:
+      - jiwar_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jiwar -d jiwar_dev"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  jiwar_pgdata:
