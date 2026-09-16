@@ -1,6 +1,12 @@
 packages:
   - "apps/*"
   - "packages/*"
+allowBuilds:
+  '@scarf/scarf': false
+  cpu-features: false
+  esbuild: true
+  protobufjs: false
+  ssh2: false
 minimumReleaseAgeExclude:
   - '@turbo/darwin-arm64@2.10.13'
   - '@turbo/linux-64@2.10.13'
@@ -10,3 +16,5 @@ minimumReleaseAgeExclude:
   - '@vitest/spy@5.0.1'
   - turbo@2.10.13
   - vitest@5.0.1
+patchedDependencies:
+  drizzle-kit@0.31.10: patches/drizzle-kit@0.31.10.patch
