@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.turbo/
+.env
+*.log
+coverage/
+test-results/
+playwright-report/
+.superpowers/
