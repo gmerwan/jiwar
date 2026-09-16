@@ -1,0 +1,36 @@
+diff --git a/api.js b/api.js
+index f4ecb91959f62fc938416a0585458c0a710af161..55e2c4e1d9ab9d021d4abfba7bc5bdbffdbc4f9c 100644
+--- a/api.js
++++ b/api.js
+@@ -12912,6 +12912,7 @@ var init_sqlgenerator = __esm({
+         "char",
+         "vector",
+         "geometry",
++        "geography",
+         "halfvec",
+         "sparsevec",
+         "bit"
+diff --git a/api.mjs b/api.mjs
+index a940272dfb05accf57a472c46c52652ec9ad0080..d6a005c9593239268259342ac63e2b1fa31c6582 100644
+--- a/api.mjs
++++ b/api.mjs
+@@ -12917,6 +12917,7 @@ var init_sqlgenerator = __esm({
+         "char",
+         "vector",
+         "geometry",
++        "geography",
+         "halfvec",
+         "sparsevec",
+         "bit"
+diff --git a/bin.cjs b/bin.cjs
+index 07274ea6f53fd54a129b3d338892feda6e995cff..cd023302f4a57dbb4297c327ba92173ec9c9ee0e 100755
+--- a/bin.cjs
++++ b/bin.cjs
+@@ -22922,6 +22922,7 @@ var init_sqlgenerator = __esm({
+         "char",
+         "vector",
+         "geometry",
++        "geography",
+         "halfvec",
+         "sparsevec",
+         "bit"
