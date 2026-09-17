@@ -89,4 +89,29 @@ describe("participant cookie", () => {
       .expect(200);
     expect(response.body.participantId).toMatch(/^[0-9a-f-]{36}$/);
   });
+
+  // Unlike the previous case, the forged value here IS UUID-shaped — it is a
+  // real, previously-issued participant id ("the victim's") with a garbage
+  // signature appended. This is the case that actually distinguishes "the
+  // signature was checked and rejected" from "the value merely failed the
+  // UUID-format check": a forged value that is not UUID-shaped would be
+  // rejected by ParticipantsService.ensure()'s own regex even with signature
+  // verification removed entirely, so it proves nothing about verification on
+  // its own. Replaying a real UUID with a bad signature closes that gap: if
+  // signature verification were ever silently dropped, this is the test that
+  // would catch an attacker impersonating another visitor well enough to
+  // cancel that visitor's notice (the exact threat Task 8 builds on).
+  it("does not let a forged cookie carrying another participant's real id impersonate them", async () => {
+    const victim = await request(app.getHttpServer()).get("/whoami").expect(200);
+    const victimId = victim.body.participantId as string;
+
+    const forgedCookie = `jiwar_pid=s:${victimId}.GARBAGE_SIGNATURE`;
+    const attacker = await request(app.getHttpServer())
+      .get("/whoami")
+      .set("Cookie", forgedCookie)
+      .expect(200);
+
+    expect(attacker.body.participantId).not.toBe(victimId);
+    expect(attacker.body.participantId).toMatch(/^[0-9a-f-]{36}$/);
+  });
 });
