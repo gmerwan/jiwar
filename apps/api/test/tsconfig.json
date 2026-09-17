@@ -1,0 +1,27 @@
+{
+  // Why this file exists, so nobody deletes it as redundant:
+  //
+  // vitest's esbuild transform picks up compiler options from the nearest
+  // `tsconfig.json` **by convention** — it resolves that name walking up from each
+  // file and never reads `--config`-style project files, so it never sees
+  // `../tsconfig.test.json`. The base `../tsconfig.json` lists "test" in its
+  // `exclude` (that exclusion is deliberate: it keeps `nest build` from emitting
+  // test files into dist/), and an excluded file gets no compiler options at all.
+  //
+  // The practical effect: without this file, `experimentalDecorators` and
+  // `emitDecoratorMetadata` are off for anything under test/, so a decorator
+  // authored here fails to parse with a bare `SyntaxError: Invalid or unexpected
+  // token` — which looks nothing like a config problem. Importing already-decorated
+  // classes from src/ keeps working, so the gap stays invisible until a test
+  // declares its own @Controller/@Module/@Injectable.
+  //
+  // `emitDecoratorMetadata` matters as much as the parse: Nest controllers use bare
+  // constructor injection with no @Inject, which resolves purely from the
+  // `design:paramtypes` metadata this flag emits.
+  //
+  // This file is for vitest's transform only. Type-checking of test/ is done by
+  // ../tsconfig.test.json, which is what `pnpm typecheck` runs.
+  "extends": "../tsconfig.json",
+  "include": ["./**/*"],
+  "exclude": []
+}

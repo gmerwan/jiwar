@@ -72,6 +72,28 @@ export async function startTestDb(): Promise<TestDb> {
       await client.end();
       await container.stop();
     },
+    /**
+     * Clears `notices` and `participants` between tests. **`categories` is
+     * deliberately NOT truncated** — that is the intended design, not an
+     * oversight: tests seed categories once in `beforeAll` and call this per
+     * test, so reference data has to survive. Adding `categories` here would
+     * empty the table out from under every notice fixture's foreign key.
+     *
+     * Two consequences a test author has to know about:
+     *
+     * 1. **Mutations to `categories` leak between tests in the same file.**
+     *    An inserted row, or an `active = false` flip, is still there in the
+     *    next test — measured: after inserting one extra category and
+     *    deactivating `funeral`, the following test saw `count = 7` and
+     *    `funeral.active = false`. A test that mutates `categories` owns
+     *    restoring them (undo it in `afterEach`, or re-seed).
+     *
+     * 2. **`RESTART IDENTITY` does not reset `categories_id_seq`**, because
+     *    that clause only touches the tables named in the statement — measured:
+     *    `last_value` stayed at 7 across a truncate. So category ids are not
+     *    stable or predictable across runs, and no fixture should hardcode one.
+     *    Look ids up by `slug` instead.
+     */
     async truncate() {
       await db.execute(sql`TRUNCATE TABLE notices, participants RESTART IDENTITY CASCADE`);
     },

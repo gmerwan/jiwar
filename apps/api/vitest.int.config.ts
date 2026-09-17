@@ -15,6 +15,11 @@ export default defineConfig({
     exclude: ["dist/**", "node_modules/**"],
     testTimeout: 60_000,
     hookTimeout: 180_000,
+    // Files run one at a time. They never share a container — each file's
+    // `beforeAll` calls `startTestDb()` and gets its own (verified: two files in
+    // one run bound host ports 55086 and 55087). What this setting does is cap
+    // the number of containers alive *at once* at one, so a run costs one
+    // container's memory rather than one per file, at the price of wall time.
     fileParallelism: false,
     globals: false,
   },
