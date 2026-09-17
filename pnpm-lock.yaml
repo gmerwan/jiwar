@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  cookie-signature: 1.2.2
+
 patchedDependencies:
   drizzle-kit@0.31.10: 125eeb837d34267972c4dc4cc133a2e9cda139194e7066f9a33385d42a820cd7
 
@@ -1450,9 +1453,6 @@ packages:
   cookie-parser@1.4.7:
     resolution: {integrity: sha512-nGUvgXnotP3BsjiLX2ypbQnWoGUPIIfHQNZkkC668ntrzGWEZVW70HDEB1qnNGMicPje6EttlIgzo51YSwNQGw==}
     engines: {node: '>= 0.8.0'}
-
-  cookie-signature@1.0.6:
-    resolution: {integrity: sha512-QADzlaHc8icV8I7vbaJXJwod9HWYp8uCqf1xa4OfNu1T7JVxQIrUgOWtHdNDtPiywmFbiS12VjotIXLrKM3orQ==}
 
   cookie-signature@1.2.2:
     resolution: {integrity: sha512-D76uU73ulSXrD1UXF4KE2TMxVVwhsnCgfAyTg9k8P6KGZjlXKrOLe4dJQKI3Bxi5wjesZoFXJWElNWBjPZMbhg==}
@@ -3719,9 +3719,7 @@ snapshots:
   cookie-parser@1.4.7:
     dependencies:
       cookie: 0.7.2
-      cookie-signature: 1.0.6
-
-  cookie-signature@1.0.6: {}
+      cookie-signature: 1.2.2
 
   cookie-signature@1.2.2: {}
 

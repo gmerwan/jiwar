@@ -1,6 +1,14 @@
 packages:
   - "apps/*"
   - "packages/*"
+overrides:
+  # cookie-parser@1.4.7 pins cookie-signature@1.0.6, whose unsign() compares
+  # signatures with a plain sha1(mac) == sha1(val) string equality rather than
+  # crypto.timingSafeEqual. That is not a constant-time comparison. 1.2.2 (already
+  # in the tree via express/supertest) fixed this to use timingSafeEqual, so it is
+  # forced here for every package that resolves cookie-signature, including
+  # cookie-parser's own dependency on 1.0.6.
+  cookie-signature: 1.2.2
 allowBuilds:
   '@scarf/scarf': false
   cpu-features: false
