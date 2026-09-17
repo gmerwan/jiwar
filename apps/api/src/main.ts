@@ -11,6 +11,10 @@ async function bootstrap() {
   const config = loadConfig();
   const app = await NestFactory.create(AppModule);
 
+  // Without this, SIGTERM/SIGINT kills the process before onModuleDestroy runs,
+  // so the postgres pool is never drained on a restart or a container stop.
+  app.enableShutdownHooks();
+
   app.setGlobalPrefix("v1");
   app.use(cookieParser(config.cookieSecret));
   app.enableCors({ origin: config.webOrigin, credentials: true });
