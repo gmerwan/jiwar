@@ -169,6 +169,19 @@ describe("participant cookie", () => {
     expect(setCookie).toMatch(/Max-Age=\d+/);
     expect(setCookie).toContain("jiwar_pid=s%3A");
   });
+
+  // This app's APP_CONFIG mock has cookieSecure: false, matching local dev.
+  // Nothing before this test asserted anything about Secure at all — a
+  // hardcoded `secure: false` in the middleware, the exact shape of the
+  // NODE_ENV bug Fix 2 in round 2 was meant to close, would still pass every
+  // other test in this file. This test and the next one, together, are what
+  // actually pin the attribute to config rather than to a hardcoded value in
+  // either direction.
+  it("does not mark the cookie Secure when config says cookieSecure is false", async () => {
+    const response = await request(app.getHttpServer()).get("/whoami").expect(200);
+    const setCookie = (response.headers["set-cookie"] as unknown as string[]).join(";");
+    expect(setCookie).not.toContain("Secure");
+  });
 });
 
 // A second, independent app instance is used for this suite because it must
@@ -222,5 +235,50 @@ describe("participant cookie via ParticipantsModule's own wiring", () => {
     const setCookie = response.headers["set-cookie"] as unknown as string[];
     expect(setCookie.join(";")).toContain("jiwar_pid=");
     expect(response.body.participantId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+// A third, independent app instance whose APP_CONFIG mock sets
+// cookieSecure: true, the deployed-behind-HTTPS configuration. Asserting on
+// the raw Set-Cookie header rather than a round-tripped cookie is
+// deliberate: supertest's client is plain HTTP, and a real browser (correctly)
+// never returns a Secure cookie over a plain HTTP connection, so sending it
+// back on a follow-up request is not something this test can observe here.
+describe("participant cookie with cookieSecure true", () => {
+  let testDb: TestDb;
+  let app: NestExpressApplication;
+
+  const COOKIE_SECRET = "test-secret-at-least-32-characters-long";
+
+  beforeAll(async () => {
+    testDb = await startTestDb();
+
+    @Module({
+      controllers: [WhoAmIController],
+      providers: [
+        ParticipantsService,
+        { provide: DRIZZLE, useValue: testDb.db },
+        { provide: APP_CONFIG, useValue: { cookieSecret: COOKIE_SECRET, cookieSecure: true } },
+      ],
+    })
+    class TestModule {}
+
+    const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
+    app = moduleRef.createNestApplication<NestExpressApplication>();
+    app.use(cookieParser(COOKIE_SECRET));
+    const middleware = new ParticipantMiddleware(app.get(ParticipantsService), app.get(APP_CONFIG));
+    app.use(middleware.use.bind(middleware));
+    await app.init();
+  }, 180_000);
+
+  afterAll(async () => {
+    await app?.close();
+    await testDb?.stop();
+  });
+
+  it("marks the cookie Secure when config says cookieSecure is true", async () => {
+    const response = await request(app.getHttpServer()).get("/whoami").expect(200);
+    const setCookie = (response.headers["set-cookie"] as unknown as string[]).join(";");
+    expect(setCookie).toContain("Secure");
   });
 });
