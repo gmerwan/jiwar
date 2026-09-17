@@ -1,5 +1,6 @@
-import { Injectable, type NestMiddleware } from "@nestjs/common";
+import { Inject, Injectable, type NestMiddleware } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
+import { APP_CONFIG, type AppConfig } from "../config.js";
 import { ParticipantsService } from "./participants.service.js";
 
 export const PARTICIPANT_COOKIE = "jiwar_pid";
@@ -7,10 +8,15 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class ParticipantMiddleware implements NestMiddleware {
-  constructor(private readonly participants: ParticipantsService) {}
+  constructor(
+    private readonly participants: ParticipantsService,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+  ) {}
 
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
-    // signedCookies is populated by cookie-parser; a forged signature leaves it undefined.
+    // signedCookies is populated by cookie-parser; a forged signature leaves the
+    // value as `false` there (not undefined), which fails the UUID check below
+    // and results in a fresh id just like a missing cookie would.
     const existing = req.signedCookies?.[PARTICIPANT_COOKIE] as string | undefined;
     const participantId = await this.participants.ensure(existing);
 
@@ -19,7 +25,7 @@ export class ParticipantMiddleware implements NestMiddleware {
         httpOnly: true,
         signed: true,
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: this.config.cookieSecure,
         maxAge: ONE_YEAR_MS,
         path: "/",
       });

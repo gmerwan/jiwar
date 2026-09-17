@@ -1,4 +1,5 @@
-import { Controller, Get, Module } from "@nestjs/common";
+import { createHmac, randomUUID } from "node:crypto";
+import { Controller, Get, Global, Module } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import cookieParser from "cookie-parser";
@@ -9,8 +10,23 @@ import { APP_CONFIG } from "../src/config.js";
 import { DRIZZLE } from "../src/db/drizzle.module.js";
 import { CurrentParticipant } from "../src/participants/current-participant.decorator.js";
 import { ParticipantMiddleware } from "../src/participants/participant.middleware.js";
+import { ParticipantsModule } from "../src/participants/participants.module.js";
 import { ParticipantsService } from "../src/participants/participants.service.js";
 import { startTestDb, type TestDb } from "./db-harness.js";
+
+/**
+ * Signs a cookie value the same way `cookie-signature@1.2.2` (the package
+ * `cookie-parser` and `res.cookie({ signed: true })` both use, per the
+ * pnpm override in pnpm-workspace.yaml) does: `value + "." + base64(hmacSha256(value))`
+ * with the trailing `=` padding stripped, prefixed with the `s:` that
+ * `express`'s `res.cookie` adds for a signed cookie. Reimplemented here with
+ * plain `node:crypto` rather than importing `cookie-signature` directly,
+ * since it is a transitive dependency of `cookie-parser`, not a direct one.
+ */
+function signCookieValue(value: string, secret: string): string {
+  const signature = createHmac("sha256", secret).update(value).digest("base64").replace(/=+$/, "");
+  return `s:${value}.${signature}`;
+}
 
 @Controller("whoami")
 class WhoAmIController {
@@ -34,7 +50,7 @@ describe("participant cookie", () => {
       providers: [
         ParticipantsService,
         { provide: DRIZZLE, useValue: testDb.db },
-        { provide: APP_CONFIG, useValue: { cookieSecret: COOKIE_SECRET } },
+        { provide: APP_CONFIG, useValue: { cookieSecret: COOKIE_SECRET, cookieSecure: false } },
       ],
     })
     class TestModule {}
@@ -42,7 +58,7 @@ describe("participant cookie", () => {
     const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
     app = moduleRef.createNestApplication<NestExpressApplication>();
     app.use(cookieParser(COOKIE_SECRET));
-    const middleware = new ParticipantMiddleware(app.get(ParticipantsService));
+    const middleware = new ParticipantMiddleware(app.get(ParticipantsService), app.get(APP_CONFIG));
     app.use(middleware.use.bind(middleware));
     await app.init();
   }, 180_000);
@@ -113,5 +129,98 @@ describe("participant cookie", () => {
 
     expect(attacker.body.participantId).not.toBe(victimId);
     expect(attacker.body.participantId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  // Sign a UUID with the real secret — so it passes signature verification —
+  // that was never inserted into `participants`. Every earlier "forged
+  // cookie" test in this file used a bad signature, so a version of
+  // `ParticipantsService.ensure()` that skipped the DB lookup entirely (e.g.
+  // `return existingId;`) would still pass them: the request never reaches
+  // the point where a missing row would matter. This test closes that gap by
+  // presenting a value the signature layer accepts, so only the row lookup
+  // stands between it and impersonating a participant that does not exist.
+  it("issues a fresh id when a validly signed cookie names a participant absent from the database", async () => {
+    const unknownId = randomUUID();
+    const cookie = `jiwar_pid=${signCookieValue(unknownId, COOKIE_SECRET)}`;
+
+    const response = await request(app.getHttpServer())
+      .get("/whoami")
+      .set("Cookie", cookie)
+      .expect(200);
+
+    expect(response.body.participantId).not.toBe(unknownId);
+    expect(response.body.participantId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  // The first test in this file already checks HttpOnly and SameSite=Lax, but
+  // stops there. A cookie stripped of `secure`, `maxAge` and `path` in
+  // `res.cookie()` would still pass that assertion untouched. This test adds
+  // the remaining attributes the brief specifies: `Path=/`, a `Max-Age` (only
+  // present at all when `maxAge` is set — its absence, not just a wrong
+  // value, is the signal that the option was dropped), and the `s%3A` prefix
+  // that `Set-Cookie`'s percent-encoding produces only for a signed value.
+  it("issues a cookie with Path=/, a Max-Age, and the signed-value prefix", async () => {
+    const response = await request(app.getHttpServer()).get("/whoami").expect(200);
+    const setCookie = (response.headers["set-cookie"] as unknown as string[]).join(";");
+
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Lax");
+    expect(setCookie).toContain("Path=/");
+    expect(setCookie).toMatch(/Max-Age=\d+/);
+    expect(setCookie).toContain("jiwar_pid=s%3A");
+  });
+});
+
+// A second, independent app instance is used for this suite because it must
+// boot the way `app.module.ts` does — importing `ParticipantsModule` itself
+// rather than manually constructing `ParticipantMiddleware` and wiring it
+// with `app.use()`, as the describe block above does for convenience. That
+// manual wiring never calls `ParticipantsModule.configure()`, so a broken
+// `forRoutes("*")` in `participants.module.ts` (e.g. changed to a path that
+// never matches) cannot be caught by any test that reuses it.
+describe("participant cookie via ParticipantsModule's own wiring", () => {
+  let testDb: TestDb;
+  let app: NestExpressApplication;
+
+  const COOKIE_SECRET = "test-secret-at-least-32-characters-long";
+
+  beforeAll(async () => {
+    testDb = await startTestDb();
+
+    @Global()
+    @Module({
+      providers: [
+        { provide: DRIZZLE, useValue: testDb.db },
+        { provide: APP_CONFIG, useValue: { cookieSecret: COOKIE_SECRET, cookieSecure: false } },
+      ],
+      exports: [DRIZZLE, APP_CONFIG],
+    })
+    class TestDependenciesModule {}
+
+    @Module({
+      controllers: [WhoAmIController],
+      imports: [TestDependenciesModule, ParticipantsModule],
+    })
+    class WiringTestModule {}
+
+    const moduleRef = await Test.createTestingModule({ imports: [WiringTestModule] }).compile();
+    app = moduleRef.createNestApplication<NestExpressApplication>();
+    app.use(cookieParser(COOKIE_SECRET));
+    // Matches main.ts's app.setGlobalPrefix("v1"), so the route this test
+    // hits is the same shape a real request would use in production.
+    app.setGlobalPrefix("v1");
+    await app.init();
+  }, 180_000);
+
+  afterAll(async () => {
+    await app?.close();
+    await testDb?.stop();
+  });
+
+  it("issues the participant cookie on a v1-prefixed route through ParticipantsModule's real forRoutes wiring", async () => {
+    const response = await request(app.getHttpServer()).get("/v1/whoami").expect(200);
+    const setCookie = response.headers["set-cookie"] as unknown as string[];
+    expect(setCookie.join(";")).toContain("jiwar_pid=");
+    expect(response.body.participantId).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
