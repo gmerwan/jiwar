@@ -1,4 +1,4 @@
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -32,13 +32,16 @@ export interface TestDb {
 const POSTGIS_IMAGE = "imresamu/postgis:18-3.6";
 
 /**
- * Resolved from this file rather than from `process.cwd()`, so the harness runs
- * the same migrations no matter which directory vitest was invoked from. These
- * are the real migrations that ship to production — a hand-written DDL copy would
- * be free to drift from the dev schema, and the integration tests would then be
- * asserting against a database shape that never actually exists.
+ * Resolved from this file's own directory rather than from `process.cwd()`, so the
+ * harness runs the same migrations no matter which directory vitest was invoked
+ * from. These are the real migrations that ship to production — a hand-written DDL
+ * copy would be free to drift from the dev schema, and the integration tests would
+ * then be asserting against a database shape that never actually exists.
  */
-const MIGRATIONS_FOLDER = fileURLToPath(new URL("../src/db/migrations", import.meta.url));
+// `__dirname` rather than `import.meta.url`: this package has no `"type": "module"`,
+// so it compiles as CommonJS and `import.meta` is a type error there (TS1470).
+// Vitest supplies both at runtime, but only this one type-checks.
+const MIGRATIONS_FOLDER = join(__dirname, "../src/db/migrations");
 
 /**
  * Boots a throwaway PostGIS container, runs the real migrations against it and

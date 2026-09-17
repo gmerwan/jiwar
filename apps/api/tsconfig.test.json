@@ -4,5 +4,11 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*", "test/**/*"]
+  "include": ["src/**/*", "test/**/*"],
+  // `exclude` filters `include`, and it is NOT merged away by `extends` — it is
+  // replaced wholesale or inherited wholesale. The base config excludes "test",
+  // so without restating this list the `include` above silently matches nothing
+  // under test/ and the harness is type-checked nowhere. "test" is dropped here
+  // on purpose; "node_modules" and "dist" are kept from the base.
+  "exclude": ["node_modules", "dist"]
 }
