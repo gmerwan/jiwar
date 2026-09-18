@@ -434,3 +434,252 @@ describe("NoticesRepository.search — trap regressions", () => {
     expect(text).not.toContain("Seq Scan on notices");
   });
 });
+
+/**
+ * Review round 1. Each case here corresponds to a defect found by adversarial
+ * review of the committed code, and each was confirmed to fail against that code
+ * before the fix landed. The cursor/fallback layer is where all four lived.
+ */
+describe("NoticesRepository.search — cursor and fallback integrity", () => {
+  let testDb: TestDb;
+  let repo: NoticesRepository;
+
+  beforeAll(async () => {
+    testDb = await startTestDb();
+    await testDb.seedCategories();
+    repo = new NoticesRepository(testDb.db);
+  }, 180_000);
+
+  afterEach(async () => {
+    await testDb.truncate();
+  });
+
+  afterAll(async () => {
+    await testDb.stop();
+  });
+
+  const search = (overrides: Record<string, unknown> = {}, grace = GRACE) =>
+    repo.search(
+      SearchNoticesSchema.parse({ lat: ALGIERS.lat, lng: ALGIERS.lng, ...overrides }),
+      grace,
+    );
+
+  /** Mints a cursor payload directly, to reach shapes `encodeCursor` would never produce. */
+  const forgeCursor = (payload: unknown) =>
+    Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+
+  // Fix 1. A cursor is an unauthenticated client string once Task 8 exposes
+  // `?cursor=`, and `SearchNoticesSchema` does not constrain it. A NUL byte in the
+  // tiebreaker previously passed the `typeof === "string"` guard and reached
+  // postgres, which rejects NUL inside `text` at the protocol level whatever the
+  // parameterisation: `invalid byte sequence for encoding "UTF8": 0x00`, surfacing
+  // as a 500.
+  it("ignores a cursor whose tiebreaker holds a NUL byte rather than throwing", async () => {
+    await makeNotice(testDb.db, { title: "Only one" });
+
+    // Built from a char code so the byte cannot be lost in an editor or a diff.
+    const withNul = forgeCursor({ k: 1, p: `a${String.fromCharCode(0)}b`, s: "soonest", w: "upcoming" });
+    const result = await search({ limit: 5, cursor: withNul });
+    expect(result.items.map((i) => i.title)).toEqual(["Only one"]);
+  });
+
+  it("ignores cursor tiebreakers outside the nanoid alphabet, including an oversized one", async () => {
+    await makeNotice(testDb.db, { title: "Only one" });
+
+    const rejected = [
+      "x".repeat(10_240), // 10 KB, previously bound and sent to postgres
+      "seventeen-chars--", // 17 chars, longer than public_id's varchar(16)
+      "", // empty
+      "has space",
+      "quote'--",
+      "semi;colon",
+    ];
+
+    for (const p of rejected) {
+      const result = await search({
+        limit: 5,
+        cursor: forgeCursor({ k: 1, p, s: "soonest", w: "upcoming" }),
+      });
+      expect(result.items.map((i) => i.title)).toEqual(["Only one"]);
+    }
+  });
+
+  it("ignores a cursor missing its sort or branch discriminator", async () => {
+    await makeNotice(testDb.db, { title: "Only one" });
+
+    const malformed = [
+      { k: 1, p: "abc123" }, // pre-fix shape, no discriminators
+      { k: 1, p: "abc123", s: "sideways", w: "upcoming" },
+      { k: 1, p: "abc123", s: "soonest", w: "sometime" },
+      { k: Number.NaN, p: "abc123", s: "soonest", w: "upcoming" },
+    ];
+
+    for (const payload of malformed) {
+      const result = await search({ limit: 5, cursor: forgeCursor(payload) });
+      expect(result.items.map((i) => i.title)).toEqual(["Only one"]);
+    }
+  });
+
+  // Fix 2. Spec §6: a notice published mid-scroll "cannot cause a duplicate or a
+  // skipped row". Before the fix the fallback was re-decided per request and the
+  // cursor recorded no branch, so one new upcoming notice flipped page 2 to the
+  // upcoming branch and applied the past cursor key to it — page 2 returned
+  // `["NEW"]` with a null cursor and "Old 3".."Old 6" became unreachable.
+  it("keeps paging past results when a notice is published mid-scroll", async () => {
+    for (let index = 1; index <= 6; index++) {
+      await makeNotice(testDb.db, { startsAt: hoursFromNow(-30 - index), title: `Old ${index}` });
+    }
+
+    const first = await search({ when: "upcoming", limit: 2 });
+    expect(first.fallback).toBe(true);
+    expect(first.items.map((i) => i.title)).toEqual(["Old 1", "Old 2"]);
+
+    // The event that used to break the scroll.
+    await makeNotice(testDb.db, { startsAt: hoursFromNow(3), title: "NEW" });
+
+    const second = await search({ when: "upcoming", limit: 2, cursor: first.nextCursor! });
+    expect(second.fallback).toBe(true);
+    expect(second.items.map((i) => i.title)).toEqual(["Old 3", "Old 4"]);
+    expect(second.items.map((i) => i.title)).not.toContain("NEW");
+
+    // And the rest of the past results stay reachable to the end of the scroll.
+    const third = await search({ when: "upcoming", limit: 2, cursor: second.nextCursor! });
+    expect(third.items.map((i) => i.title)).toEqual(["Old 5", "Old 6"]);
+    expect(third.nextCursor).toBeNull();
+  });
+
+  it("reaches every past notice through a fallback scroll with none repeated", async () => {
+    for (let index = 1; index <= 6; index++) {
+      await makeNotice(testDb.db, { startsAt: hoursFromNow(-30 - index), title: `Old ${index}` });
+    }
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const page = await search(
+        cursor ? { when: "upcoming", limit: 2, cursor } : { when: "upcoming", limit: 2 },
+      );
+      expect(page.fallback).toBe(true);
+      seen.push(...page.items.map((item) => item.title));
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 10);
+
+    expect(seen).toEqual(["Old 1", "Old 2", "Old 3", "Old 4", "Old 5", "Old 6"]);
+  });
+
+  // Fix 3. A metres key and an epoch-millis key are both plain numbers, so a cursor
+  // from the other ordering was undetectable and its bound meaningless. Measured
+  // before the fix: carrying a `nearest` cursor into `soonest` replayed page 1
+  // (`["N1","N2"]` twice), and carrying a `soonest` cursor into `nearest` returned
+  // `[]` — a dead-end page with rows unread.
+  it("restarts rather than replaying when the sort changes mid-scroll", async () => {
+    // Distance order is the exact reverse of time order, so a crossed cursor shows up.
+    for (let index = 1; index <= 5; index++) {
+      await makeNotice(testDb.db, {
+        ...offsetPoint(ALGIERS, (6 - index) * 2_000),
+        startsAt: hoursFromNow(index),
+        title: `N${index}`,
+      });
+    }
+
+    const bySoonest = await search({ sort: "soonest", limit: 2 });
+    expect(bySoonest.items.map((i) => i.title)).toEqual(["N1", "N2"]);
+
+    // Same cursor, different sort: must page 1 of the new ordering, not an empty page.
+    const switched = await search({ sort: "nearest", limit: 2, cursor: bySoonest.nextCursor! });
+    expect(switched.items.map((i) => i.title)).toEqual(["N5", "N4"]);
+    expect(switched.nextCursor).not.toBeNull();
+
+    // And the reverse direction, which used to replay rows already served.
+    const byNearest = await search({ sort: "nearest", limit: 2 });
+    expect(byNearest.items.map((i) => i.title)).toEqual(["N5", "N4"]);
+    const switchedBack = await search({ sort: "soonest", limit: 2, cursor: byNearest.nextCursor! });
+    expect(switchedBack.items.map((i) => i.title)).toEqual(["N1", "N2"]);
+  });
+
+  it("still pages correctly when the sort is held constant across a cursor", async () => {
+    // The guard above must not reject a legitimate continuation of the same sort.
+    for (let index = 1; index <= 5; index++) {
+      await makeNotice(testDb.db, {
+        ...offsetPoint(ALGIERS, index * 1_500),
+        startsAt: hoursFromNow(index),
+        title: `N${index}`,
+      });
+    }
+
+    const first = await search({ sort: "nearest", limit: 2 });
+    const second = await search({ sort: "nearest", limit: 2, cursor: first.nextCursor! });
+    expect(first.items.map((i) => i.title)).toEqual(["N1", "N2"]);
+    expect(second.items.map((i) => i.title)).toEqual(["N3", "N4"]);
+  });
+
+  // Fix 4, M5. `pastGraceHours` reached the mapper's `isPast` but its wiring into the
+  // SQL cutoff was asserted nowhere: hardcoding `make_interval(hours => 24)` left all
+  // 27 earlier tests green, because every one of them passes 24.
+  it("uses the configured pastGraceHours in the SQL cutoff, not a hardcoded 24", async () => {
+    // 36h old: past under a 24h grace, still upcoming under a 48h one.
+    await makeNotice(testDb.db, { startsAt: hoursFromNow(-36), title: "36h old" });
+
+    const past24 = await search({ when: "past" }, { pastGraceHours: 24 });
+    expect(past24.items.map((i) => i.title)).toEqual(["36h old"]);
+
+    const past48 = await search({ when: "past" }, { pastGraceHours: 48 });
+    expect(past48.items).toHaveLength(0);
+
+    const upcoming48 = await search({ when: "upcoming" }, { pastGraceHours: 48 });
+    expect(upcoming48.items.map((i) => i.title)).toEqual(["36h old"]);
+    // Found by the upcoming branch itself, so this is not the fallback talking.
+    expect(upcoming48.fallback).toBe(false);
+    expect(upcoming48.items[0]!.isPast).toBe(false);
+  });
+
+  // Fix 4, M8. The brief's case 7 asserts `fallback === false` for a `past` search on
+  // an **empty table**, where both branches find nothing and the flag is false either
+  // way, so removing `|| params.when === "past"` from the guard survives it.
+  it("never falls back to upcoming notices when the search is explicitly for past", async () => {
+    await makeNotice(testDb.db, { startsAt: hoursFromNow(3), title: "Upcoming" });
+
+    const result = await search({ when: "past" });
+    expect(result.items).toHaveLength(0);
+    expect(result.fallback).toBe(false);
+  });
+
+  /**
+   * The case above is NOT what kills that mutation, and neither was the reviewer's
+   * suggested fixture — I checked both against the mutant and both stayed green. The
+   * reason: dropping the guard makes an empty `past` primary fall through to
+   * `runSearch(..., "past", null)`, which is the *same branch* re-run without the
+   * cursor. With no past rows at all, that returns the same empty page, so nothing
+   * observable changes.
+   *
+   * The guard only becomes observable when the **cursor** is what emptied the primary
+   * — then the mutant discards it and wraps the reader back to page 1, reporting
+   * `fallback: true` on an explicit `past` search that never fell back. Measured
+   * against the mutant: page 2 of a past scroll returned `["Old 1","Old 2"]` with
+   * `fallback=true` instead of ending the scroll.
+   */
+  it("ends a past scroll instead of wrapping to page 1 when the remaining rows disappear", async () => {
+    const made = [];
+    for (let index = 1; index <= 4; index++) {
+      made.push(
+        await makeNotice(testDb.db, { startsAt: hoursFromNow(-30 - index), title: `Old ${index}` }),
+      );
+    }
+
+    const first = await search({ when: "past", limit: 2 });
+    expect(first.items.map((i) => i.title)).toEqual(["Old 1", "Old 2"]);
+    expect(first.nextCursor).not.toBeNull();
+
+    // The two rows the reader had not reached yet are cancelled mid-scroll.
+    for (const notice of made.slice(2)) {
+      expect(await repo.cancel(notice.publicId, notice.authorParticipantId)).toBe(true);
+    }
+
+    const second = await search({ when: "past", limit: 2, cursor: first.nextCursor! });
+    expect(second.items).toHaveLength(0);
+    // Crucially not ["Old 1","Old 2"] again, and not flagged as a fallback.
+    expect(second.fallback).toBe(false);
+  });
+});

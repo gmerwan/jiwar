@@ -36,18 +36,50 @@ interface Cursor {
   k: number;
   /** publicId tiebreaker, so equal keys still page deterministically. */
   p: string;
+  /**
+   * The `sort` this cursor was minted under, and the branch that minted it
+   * ("upcoming" or the past-notice fallback). Both are needed because `k` is a bare
+   * number in either mode — an epoch-millis key and a metres key are
+   * indistinguishable once encoded — so without a discriminator a cursor from one
+   * ordering is silently applied to another. `search` and `runSearch` each document
+   * what they do on a mismatch, and why the two answers differ.
+   */
+  s: "soonest" | "nearest";
+  w: "upcoming" | "past";
 }
+
+/**
+ * Every character `nanoid` can emit, and nothing else.
+ *
+ * The tiebreaker `p` is compared against `notices.public_id`, which is a
+ * `nanoid(12)` in a `varchar(16)`, so this is the complete set of legitimate
+ * values. The bound is a hard security boundary rather than tidiness: a cursor is
+ * an opaque client-supplied string that `SearchNoticesSchema` accepts unvalidated,
+ * so before this check any JSON string reached postgres as a bound parameter.
+ *
+ * A NUL byte is the case that mattered. Postgres rejects NUL inside `text` at the
+ * protocol level, so parameterisation does not help and the driver raises
+ * `invalid byte sequence for encoding "UTF8": 0x00` — a 500 from an unauthenticated
+ * query string once Task 8 exposes `?cursor=`, and a direct violation of the
+ * "ignores a malformed cursor rather than throwing" invariant asserted below. The
+ * length cap also bounds the payload: a 10 KB `p` was previously bound and sent.
+ */
+const CURSOR_TIEBREAKER_PATTERN = /^[A-Za-z0-9_-]{1,16}$/;
 
 function encodeCursor(cursor: Cursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
 
+/** Returns null for anything not minted by `encodeCursor`, so a bad cursor pages from the start. */
 function decodeCursor(raw: string | undefined): Cursor | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
-    if (typeof parsed?.k === "number" && typeof parsed?.p === "string") return parsed;
-    return null;
+    if (typeof parsed?.k !== "number" || !Number.isFinite(parsed.k)) return null;
+    if (typeof parsed?.p !== "string" || !CURSOR_TIEBREAKER_PATTERN.test(parsed.p)) return null;
+    if (parsed?.s !== "soonest" && parsed?.s !== "nearest") return null;
+    if (parsed?.w !== "upcoming" && parsed?.w !== "past") return null;
+    return { k: parsed.k, p: parsed.p, s: parsed.s, w: parsed.w };
   } catch {
     return null;
   }
@@ -58,14 +90,43 @@ export class NoticesRepository {
   constructor(@Inject(DRIZZLE) private readonly db: JiwarDb) {}
 
   async search(params: SearchNotices, options: SearchOptions): Promise<SearchOutcome> {
-    const primary = await this.runSearch(params, options, params.when);
+    const cursor = decodeCursor(params.cursor);
+
+    // A cursor minted by the past-notice fallback keeps paging the past branch for
+    // the rest of the scroll, rather than letting `search()` re-decide per request.
+    //
+    // Re-deciding is what lost rows: the fallback is chosen by "is the upcoming
+    // branch empty right now?", so publishing one upcoming notice mid-scroll flipped
+    // page 2 to the upcoming branch and applied the *past* cursor key to it.
+    // Measured before this fix, with six past notices and a `limit` of 2 —
+    //   page 1: fallback=true  ["Old 1","Old 2"]
+    //   (a notice starting in 3h is published)
+    //   page 2: fallback=false ["NEW"] nextCursor=null
+    // leaving "Old 3".."Old 6" unreachable. Spec §6 promises a notice published
+    // mid-scroll "cannot cause a duplicate or a skipped row", so that was a spec
+    // violation and not merely surprising.
+    //
+    // Pinning is chosen over ignoring the cursor because the alternative restarts the
+    // reader at page 1 — every row they have already scrolled past comes back as a
+    // duplicate, which is the other half of what §6 rules out. The reader keeps
+    // descending through the past results they were actually looking at, and picks up
+    // anything newly published on their next fresh search.
+    if (cursor?.w === "past" && params.when === "upcoming") {
+      const continued = await this.runSearch(params, options, "past", cursor);
+      return { ...continued, fallback: true };
+    }
+
+    const primary = await this.runSearch(params, options, params.when, cursor);
 
     if (primary.items.length > 0 || params.when === "past") {
       return { ...primary, fallback: false };
     }
 
-    // Spec §6: an empty upcoming search falls back to recent past notices.
-    const fallback = await this.runSearch(params, options, "past");
+    // Spec §6: an empty upcoming search falls back to recent past notices. The
+    // upcoming-minted cursor is deliberately not carried across the branch switch —
+    // its key is measured against a different filter — so the fallback starts at its
+    // own first page and mints a `w: "past"` cursor of its own.
+    const fallback = await this.runSearch(params, options, "past", null);
     return { ...fallback, fallback: fallback.items.length > 0 };
   }
 
@@ -73,12 +134,26 @@ export class NoticesRepository {
     params: SearchNotices,
     options: SearchOptions,
     when: "upcoming" | "past",
+    incoming: Cursor | null,
   ): Promise<{ items: NoticeWithDistance[]; nextCursor: string | null }> {
     const origin = sql`ST_SetSRID(ST_MakePoint(${params.lng}, ${params.lat}), 4326)::geography`;
     const radiusMetres = params.radiusKm * 1000;
     const cutoff = sql`now() - make_interval(hours => ${options.pastGraceHours})`;
-    const cursor = decodeCursor(params.cursor);
     const limit = params.limit;
+
+    // A cursor minted under the other `sort` is discarded rather than applied. Its `k`
+    // is a distance in metres where this query compares epoch millis, or the reverse:
+    // both are plain numbers, so nothing downstream can detect the mismatch, and the
+    // comparison silently succeeds against a meaningless bound. Measured before this
+    // fix, toggling sort mid-scroll over five notices — carrying a `nearest` cursor
+    // into a `soonest` query replayed `["N1","N2"]`, page 1 all over again, and
+    // carrying a `soonest` cursor into a `nearest` query returned `[]`, a dead-end
+    // page with rows still unread.
+    //
+    // Restarting is right here, unlike the fallback case above: changing the sort is a
+    // deliberate act by the reader, and page 1 of the new ordering is what they asked
+    // for. Re-serving rows under a *new* ordering is not the duplicate §6 forbids.
+    const cursor = incoming && incoming.s === params.sort ? incoming : null;
 
     const conditions = [
       sql`n.status = 'published'`,
@@ -160,8 +235,17 @@ export class NoticesRepository {
 
     return {
       items: page.map((row) => toNoticeWithDistance(row, options.pastGraceHours)),
+      // The minted cursor records the ordering and the branch it came from, so the next
+      // request can tell a continuation from a cursor belonging to a different query.
       nextCursor:
-        hasMore && last ? encodeCursor({ k: Number(last.sortKey), p: last.publicId }) : null,
+        hasMore && last
+          ? encodeCursor({
+              k: Number(last.sortKey),
+              p: last.publicId,
+              s: params.sort,
+              w: when,
+            })
+          : null,
     };
   }
 
