@@ -73,7 +73,26 @@ function requiredCoordinate(
 }
 
 /**
- * `SearchNoticesSchema` with `lat`/`lng` hardened for query-string input.
+ * A NUL byte (`U+0000`) anywhere in a string.
+ *
+ * Postgres rejects NUL inside `text` at the protocol level, so parameterisation
+ * is no defence: the driver raises `invalid byte sequence for encoding "UTF8":
+ * 0x00` (SQLSTATE 22021) and the request becomes a 500. Task 7 guarded the cursor
+ * tiebreaker for exactly this reason, and its comment anticipated that it would
+ * matter "once Task 8 exposes `?cursor=`" — but the guard was per-field, so the
+ * new inputs this task exposes were never covered.
+ *
+ * `categories` is the one *query* field that needs it. Measured against a live
+ * server, `?categories=a%00b` returned 500, while `lat`, `lng`, `radiusKm`,
+ * `limit`, `when` and `sort` all returned a clean 400 — their number and enum
+ * validators reject a NUL before it can reach a bound parameter. `categories` is
+ * the only free-form `z.string()` in the query that is passed through to SQL.
+ */
+const NUL_BYTE = /\u0000/;
+
+/**
+ * `SearchNoticesSchema` with `lat`/`lng` hardened for query-string input, and
+ * `categories` guarded against a NUL byte.
  *
  * Every other field, and every default, comes from the shared contract, so the
  * accepted query string cannot drift from what Task 10's client sends.
@@ -91,6 +110,22 @@ export const SearchNoticesQuerySchema = SearchNoticesSchema.extend({
     maximum: 180,
     description: "Longitude of the search origin.",
   }),
+  // Checked *after* the contract's own union-and-transform has normalised one
+  // slug or many into an array, so a single `?categories=a%00b` and one bad entry
+  // among several are both caught by the same test. Chaining `.check()` onto the
+  // contract's field rather than redeclaring it keeps the accepted input, the
+  // transform and the OpenAPI `anyOf` shape exactly as the contract defines them
+  // (verified: the rendered schema is unchanged).
+  categories: SearchNoticesSchema.shape.categories.check((ctx) => {
+    if (Array.isArray(ctx.value) && ctx.value.some((slug) => NUL_BYTE.test(slug))) {
+      ctx.issues.push({
+        code: "custom",
+        input: ctx.value,
+        path: [],
+        message: "categories must not contain a NUL byte",
+      });
+    }
+  }),
 });
 
 /**
@@ -101,3 +136,32 @@ export const SearchNoticesQuerySchema = SearchNoticesSchema.extend({
  */
 export const _searchQueryMatchesContract: (q: z.infer<typeof SearchNoticesQuerySchema>) => SearchNotices =
   (q) => q;
+
+/**
+ * Every character a `public_id` can legitimately contain, and nothing else.
+ *
+ * Deliberately the same pattern the repository already applies to a cursor's
+ * tiebreaker (`CURSOR_TIEBREAKER_PATTERN`), because it describes the same values:
+ * a `public_id` is a `nanoid(12)` stored in a `varchar(16)`, and `nanoid`'s
+ * alphabet is exactly `A-Za-z0-9_-`. Keeping the two identical means a future
+ * change to the id format has one obvious shape to update rather than two that
+ * can silently diverge.
+ *
+ * Why this is a guard and not merely tidiness: `publicId` is an unvalidated path
+ * parameter that reaches postgres as a bound parameter in both
+ * `findByPublicId` and `cancel`. Measured against a live server before this
+ * guard, `GET /v1/notices/a%00b` and `POST /v1/notices/a%00b/cancel` both
+ * returned **500** — `PostgresError: invalid byte sequence for encoding "UTF8":
+ * 0x00`, SQLSTATE 22021, `where: 'unnamed portal parameter $3'` — because
+ * Postgres rejects a NUL inside `text` at the protocol level, so binding the
+ * parameter does not help. The 500 also put the failing SQL and every bound
+ * parameter into the server log on each occurrence. The length cap additionally
+ * bounds the payload: a multi-kilobyte id was previously bound and sent, and no
+ * value over 16 characters can ever match a row.
+ */
+export const PUBLIC_ID_PATTERN = /^[A-Za-z0-9_-]{1,16}$/;
+
+/** True for a path id that could never identify a row, so it must not reach SQL. */
+export function isWellFormedPublicId(publicId: string): boolean {
+  return PUBLIC_ID_PATTERN.test(publicId);
+}

@@ -8,6 +8,7 @@ import {
 import type { CreateNotice, Notice, SearchNotices } from "@jiwar/contracts";
 import { APP_CONFIG, type AppConfig } from "../config.js";
 import { NoticesRepository, type SearchOutcome } from "./notices.repository.js";
+import { isWellFormedPublicId } from "./search-query.schema.js";
 
 @Injectable()
 export class NoticesService {
@@ -63,7 +64,20 @@ export class NoticesService {
     }
   }
 
+  /**
+   * A malformed id is answered as a plain 404 without touching the database.
+   *
+   * `publicId` is an unvalidated path parameter that is bound into SQL, and a NUL
+   * byte inside it made postgres reject the whole statement at the protocol level
+   * — a 500 from client-supplied garbage, plus the failing SQL and its bound
+   * parameters in the server log. 404 is the honest answer regardless of the
+   * driver: an id outside `nanoid`'s alphabet, or longer than the `varchar(16)`
+   * column, cannot identify a row, so "not found" is what a query would have
+   * concluded anyway. It also keeps the response indistinguishable from a
+   * well-formed id that simply does not exist.
+   */
   async findOne(publicId: string): Promise<Notice> {
+    if (!isWellFormedPublicId(publicId)) throw new NotFoundException("Notice not found");
     const notice = await this.repository.findByPublicId(publicId, this.config.pastGraceHours);
     if (!notice) throw new NotFoundException("Notice not found");
     return notice;
@@ -77,8 +91,17 @@ export class NoticesService {
    *
    * 403 is returned for "not found" as well as "not yours", deliberately: a 404
    * here would confirm to a stranger which public ids exist and are cancellable.
+   *
+   * A malformed id gets that same 403, short-circuited before any SQL runs. The
+   * guard is here for the NUL-byte 500 described on `PUBLIC_ID_PATTERN`, but the
+   * code it returns is chosen to preserve this route's existing anti-enumeration
+   * property: answering 404 for "unparseable" while every other unauthorised
+   * request gets 403 would hand a prober a way to tell the two apart.
    */
   async cancel(publicId: string, participantId: string): Promise<{ cancelled: true }> {
+    if (!isWellFormedPublicId(publicId)) {
+      throw new ForbiddenException("Only the author can cancel this notice");
+    }
     const cancelled = await this.repository.cancel(publicId, participantId);
     if (!cancelled) {
       throw new ForbiddenException("Only the author can cancel this notice");

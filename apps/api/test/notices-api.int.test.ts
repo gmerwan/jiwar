@@ -674,4 +674,231 @@ describe("notices API", () => {
       limit: 7,
     });
   });
+  // =====================================================================
+  // Fix round 1, Fix 1: NUL byte on the inputs THIS task exposed
+  //
+  // Task 7 guarded the cursor tiebreaker, and its comment anticipated that the
+  // hazard would matter "once Task 8 exposes `?cursor=`" — but the guard was
+  // per-field, so the four further inputs this task opened were never covered.
+  // Postgres rejects a NUL inside `text` at the protocol level, so binding the
+  // parameter is no defence: the driver raises `invalid byte sequence for encoding
+  // "UTF8": 0x00` (SQLSTATE 22021) and the request became a 500, with the failing
+  // SQL and every bound parameter written to the server log each time.
+  //
+  // Reproduced against a live server before the fix:
+  //   GET  /v1/notices/a%00b                          -> 500
+  //   POST /v1/notices/a%00b/cancel                   -> 500
+  //   GET  /v1/notices?...&categories=a%00b           -> 500
+  //   POST /v1/notices  with \u0000 in a text field   -> 500
+  // while the same paths with clean input gave 404/403/200/201, and Task 7's
+  // guarded `?cursor=` with a NUL escape correctly gave 200.
+  // =====================================================================
+
+  // `%00` in the path is decoded by Express into a real NUL in req.params, so this
+  // is the raw byte reaching SQL, not an escape sequence.
+  it.each([
+    ["a NUL byte", "a\u0000b"],
+    ["a bare NUL", "\u0000"],
+    ["an id longer than the varchar(16) column", "A".repeat(500)],
+    ["an id with a quote", "a'b"],
+    ["an id holding SQL", "'; DROP TABLE notices;--"],
+    ["an id with a newline", "a\nb"],
+  ])("answers a malformed public id (%s) on the detail route with 404, not 500", async (_label, publicId) => {
+    await request(app.getHttpServer())
+      .get(`/v1/notices/${encodeURIComponent(publicId)}`)
+      .expect(404);
+  });
+
+  it.each([
+    ["a NUL byte", "a\u0000b"],
+    ["an id longer than the varchar(16) column", "A".repeat(500)],
+    ["an id holding SQL", "'; DROP TABLE notices;--"],
+  ])("answers a malformed public id (%s) on the cancel route with 403, not 500", async (_label, publicId) => {
+    const agent = request.agent(app.getHttpServer());
+    await agent.post("/v1/notices").send(validBody).expect(201);
+
+    // 403 rather than 404, deliberately: every other unauthorised cancel already
+    // answers 403, and returning 404 only for an unparseable id would give a
+    // prober a way to distinguish the two cases.
+    await agent
+      .post(`/v1/notices/${encodeURIComponent(publicId)}/cancel`)
+      .expect(403);
+  });
+
+  it("rejects a NUL byte in a categories slug with 400, not 500", async () => {
+    const response = await request(app.getHttpServer())
+      .get("/v1/notices")
+      .query({ lat: ALGIERS.lat, lng: ALGIERS.lng, categories: "a\u0000b" })
+      .expect(400);
+
+    expect(JSON.stringify(response.body.message)).toContain("categories");
+  });
+
+  it("rejects a NUL byte in one of several categories slugs with 400", async () => {
+    // The contract normalises one slug or many into an array before the guard
+    // runs, so a bad entry alongside good ones is caught by the same check.
+    await request(app.getHttpServer())
+      .get(`/v1/notices?lat=${ALGIERS.lat}&lng=${ALGIERS.lng}&categories=funeral&categories=a%00b`)
+      .expect(400);
+  });
+
+  it("still serves clean ids and slugs on those same paths", async () => {
+    // The counterfactual for every case above: the guards must reject only what
+    // could never identify a row, and a pattern that was too strict (or a
+    // categories check that rejected any string) would break these.
+    const agent = request.agent(app.getHttpServer());
+    const created = await agent.post("/v1/notices").send(validBody).expect(201);
+
+    // A real nanoid(12) passes the pattern and resolves.
+    await request(app.getHttpServer()).get(`/v1/notices/${created.body.publicId}`).expect(200);
+    // A well-formed id that simply does not exist is still a 404, indistinguishable
+    // from the malformed case above — which is the point.
+    await request(app.getHttpServer()).get("/v1/notices/doesnotexist").expect(404);
+    // Ids using the rest of nanoid's alphabet, including both its symbols.
+    await request(app.getHttpServer()).get("/v1/notices/aB3-_xyz0912").expect(404);
+    // A clean category filter still works.
+    await request(app.getHttpServer())
+      .get("/v1/notices")
+      .query({ lat: ALGIERS.lat, lng: ALGIERS.lng, categories: "funeral" })
+      .expect(200);
+    // And the author can still cancel with a real id.
+    await agent.post(`/v1/notices/${created.body.publicId}/cancel`).expect(200);
+  });
+
+  it("does not reach the database for a malformed id", async () => {
+    // Distinguishes "the guard short-circuited" from "the query ran and found
+    // nothing" — the latter would still have sent the NUL to postgres. A notice
+    // exists, so a query that did run would be visible in the table; what is
+    // asserted is that the connection survives and keeps serving, which a
+    // protocol-level encoding error would have disrupted.
+    await makeNotice(testDb.db, { title: "Untouched" });
+
+    await request(app.getHttpServer()).get("/v1/notices/a%00b").expect(404);
+
+    const rows = await testDb.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM notices`);
+    expect(rows[0]!.n).toBe(1);
+
+    const after = await request(app.getHttpServer())
+      .get("/v1/notices")
+      .query({ lat: ALGIERS.lat, lng: ALGIERS.lng })
+      .expect(200);
+    expect(after.body.items.map((i: { title: string }) => i.title)).toEqual(["Untouched"]);
+  });
+
+  // KNOWN GAP, left deliberately and reported: the POST body's text fields.
+  //
+  // A `\u0000` inside `title`/`description`/`venueName`/`address` still produces a
+  // 500. Fixing it needs the same contracts-level decision already parked with the
+  // Null Island item — `CreateNoticeSchema` is refined, so `.extend()` throws, and
+  // the wrapper alternative destroys the Swagger request body. Pinned here so the
+  // parked decision demonstrably covers it and nobody assumes it was handled.
+  it("currently returns 500 for a NUL byte in a create body field (known contract gap)", async () => {
+    const response = await request(app.getHttpServer())
+      .post("/v1/notices")
+      .send({ ...validBody, title: `Funeral prayer\u0000 for the late Ahmed Benali` });
+
+    expect(response.status).toBe(500);
+  });
+
+  // =====================================================================
+  // Fix round 1, Fix 2: no participants row on a request that needs no identity
+  //
+  // `forRoutes("*")` plus an unconditional `ensure()` meant any client ignoring
+  // Set-Cookie wrote one row per request, unbounded, into the table
+  // `notices.author_participant_id` references. Measured before the fix: 50
+  // anonymous GET /v1/notices -> +50 rows; 50 GET /v1/categories -> +50; 20 detail
+  // 404s -> +20; 20 requests that 400 -> +20; 10 unknown-route 404s -> +10.
+  //
+  // The identity is now minted lazily by @CurrentParticipant(), so only create and
+  // cancel — the two handlers that consume it — ever insert.
+  // =====================================================================
+
+  const countParticipants = async (): Promise<number> => {
+    const rows = await testDb.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM participants`,
+    );
+    return rows[0]!.n;
+  };
+
+  it("inserts no participant row for a cookieless GET /v1/categories", async () => {
+    const before = await countParticipants();
+    for (let i = 0; i < 10; i += 1) {
+      await request(app.getHttpServer()).get("/v1/categories").expect(200);
+    }
+    expect(await countParticipants()).toBe(before);
+  });
+
+  it.each([
+    ["a search", () => request(app.getHttpServer()).get("/v1/notices").query({ lat: ALGIERS.lat, lng: ALGIERS.lng }).expect(200)],
+    ["a detail 404", () => request(app.getHttpServer()).get("/v1/notices/doesnotexist").expect(404)],
+    ["a validation 400", () => request(app.getHttpServer()).get("/v1/notices").query({ lat: "", lng: "" }).expect(400)],
+    ["an unknown route", () => request(app.getHttpServer()).get("/v1/nope").expect(404)],
+    ["a malformed id", () => request(app.getHttpServer()).get("/v1/notices/a%00b").expect(404)],
+  ])("inserts no participant row for %s", async (_label, send) => {
+    const before = await countParticipants();
+    for (let i = 0; i < 5; i += 1) await send();
+    expect(await countParticipants()).toBe(before);
+  });
+
+  it("still mints exactly one participant row for a create, and reuses it", async () => {
+    // The counterfactual for the cases above: minting must still happen where an
+    // identity is genuinely consumed, or the cookie and authorship break. A guard
+    // that simply never inserted would pass every zero-row test above.
+    const before = await countParticipants();
+    const agent = request.agent(app.getHttpServer());
+
+    const created = await agent.post("/v1/notices").send(validBody).expect(201);
+    expect(await countParticipants()).toBe(before + 1);
+
+    const setCookie = created.headers["set-cookie"] as unknown as string[];
+    expect(setCookie.join(";")).toContain("jiwar_pid=s%3A");
+
+    // A second write from the same agent reuses the cookie: no new row.
+    await agent.post("/v1/notices").send({ ...validBody, title: "A second notice entirely" }).expect(201);
+    expect(await countParticipants()).toBe(before + 1);
+
+    // And the identity still authorises the cancel.
+    await agent.post(`/v1/notices/${created.body.publicId}/cancel`).expect(200);
+    expect(await countParticipants()).toBe(before + 1);
+  });
+
+  it("mints one row for a cookieless cancel attempt, which is still refused", async () => {
+    // Cancel consumes @CurrentParticipant(), so it does mint — that is correct and
+    // unavoidable: the id is what the authorisation check compares against. What
+    // matters is that it is one row for a request that needed an identity, not one
+    // row for every anonymous read.
+    const author = request.agent(app.getHttpServer());
+    const created = await author.post("/v1/notices").send(validBody).expect(201);
+
+    const before = await countParticipants();
+    await request(app.getHttpServer())
+      .post(`/v1/notices/${created.body.publicId}/cancel`)
+      .expect(403);
+    expect(await countParticipants()).toBe(before + 1);
+  });
+
+  it("mints a single row when one handler resolves the identity twice", async () => {
+    // The resolver is memoised per request. Without that, two @CurrentParticipant()
+    // parameters (or a guard plus a handler) would race and insert two rows for one
+    // request. Asserted through create, which resolves once, plus a direct check
+    // that the cookie round-trips to the same id rather than a second one.
+    const agent = request.agent(app.getHttpServer());
+    const before = await countParticipants();
+
+    const first = await agent.post("/v1/notices").send(validBody).expect(201);
+    const firstAuthor = await testDb.db.execute<{ id: string }>(sql`
+      SELECT author_participant_id AS id FROM notices WHERE public_id = ${first.body.publicId}
+    `);
+
+    const second = await agent
+      .post("/v1/notices")
+      .send({ ...validBody, title: "Another notice from the same author" })
+      .expect(201);
+    const secondAuthor = await testDb.db.execute<{ id: string }>(sql`
+      SELECT author_participant_id AS id FROM notices WHERE public_id = ${second.body.publicId}
+    `);
+
+    expect(secondAuthor[0]!.id).toBe(firstAuthor[0]!.id);
+    expect(await countParticipants()).toBe(before + 1);
+  });
 });
