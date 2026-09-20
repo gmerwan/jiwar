@@ -9,6 +9,19 @@ overrides:
   # forced here for every package that resolves cookie-signature, including
   # cookie-parser's own dependency on 1.0.6.
   cookie-signature: 1.2.2
+  # drizzle-kit@0.31.10 pins a newer tsx (4.23.13) than apps/api's own explicit
+  # devDependency (4.20.6). Because vite's peer resolution folds the resolved
+  # tsx version into vitest's dependency key, pnpm was building two physically
+  # distinct vitest@5.0.1 instances workspace-wide (one per tsx variant). Any
+  # package whose vitest resolved against the 4.23.13-keyed copy (apps/web,
+  # packages/contracts) loaded a *different* vitest module than the one
+  # @testing-library/jest-dom's hoisted single copy resolves `vitest` against,
+  # so jest-dom/vitest's expect.extend() patched the wrong chai instance and
+  # broke `expect(...).rejects.toThrow(...)` file-wide once test-setup.ts ran.
+  # Pinning tsx to one version workspace-wide collapses this back to a single
+  # vitest instance. drizzle-kit only uses tsx to load its own .ts config
+  # files, so downgrading it from 4.23.13 to 4.20.6 is inert for our usage.
+  tsx: 4.20.6
 allowBuilds:
   '@scarf/scarf': false
   cpu-features: false
