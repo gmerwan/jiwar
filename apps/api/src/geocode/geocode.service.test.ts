@@ -193,14 +193,11 @@ describe("GeocodeService", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
-    it("removes the in-flight entry once the shared request settles, successfully or not", async () => {
-      // Distinct keys per phase so this observes the in-flight map's own
-      // lifecycle rather than the (separate, deliberately unchanged this round)
-      // negative-caching behaviour: a failed search's *cache* entry legitimately
-      // holds [] for the rest of the TTL, but the in-flight *coalescing* entry
-      // for that key must still be gone once the request settles, or a second
-      // concurrent burst for the same key later would wait on a stale promise
-      // instead of deciding fresh whether to use the (now time-limited) cache.
+    it("removes the in-flight entry for a different key once a failed request settles (cross-key isolation)", async () => {
+      // Distinct keys per phase: this test proves the in-flight map isn't left
+      // holding a dangling/rejected entry that corrupts *other* keys after a
+      // failure. It does not exercise same-key reuse after failure — see the
+      // next test for that.
       let rejectFetch!: (error: unknown) => void;
       fetchMock.mockImplementation(
         () =>
@@ -229,6 +226,37 @@ describe("GeocodeService", () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
+    it("removes the in-flight entry for the SAME key once a failed request settles, so a later burst for that key retries fresh", async () => {
+      // Same key ("retry-key") in both bursts, unlike the cross-key test above.
+      // The failed burst caches [] for retry-key (negative caching, deliberately
+      // unchanged this round), so the second burst is expected to be served
+      // from that cache rather than triggering a second fetch — this test
+      // exists to prove the in-flight *coalescing* entry doesn't leak or wedge
+      // a second burst onto a dead/rejected promise, not to bypass the cache.
+      let rejectFetch!: (error: unknown) => void;
+      fetchMock.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            rejectFetch = reject;
+          }),
+      );
+      const firstBurst = [service.search("retry-key"), service.search("retry-key")];
+      rejectFetch(new Error("network down"));
+      const firstResults = await Promise.all(firstBurst);
+      expect(firstResults).toEqual([[], []]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Immediately burst again on the identical key. If the in-flight entry
+      // from the failed request were still registered (leaked), this second
+      // burst would hang awaiting a promise that already settled/rejected —
+      // instead it must resolve promptly (from the negative cache here, since
+      // the TTL hasn't expired), with no additional fetch and no hang/throw.
+      const secondBurst = [service.search("retry-key"), service.search("retry-key")];
+      const secondResults = await Promise.all(secondBurst);
+      expect(secondResults).toEqual([[], []]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
     it("coalesces N concurrent identical reverse-geocode calls into a single upstream fetch", async () => {
       let resolveFetch!: (value: unknown) => void;
       fetchMock.mockImplementation(
@@ -254,6 +282,27 @@ describe("GeocodeService", () => {
       for (const result of results) {
         expect(result).toEqual({ label: "Algiers, Algeria", lat: 36.7538, lng: 3.0588 });
       }
+    });
+  });
+
+  // --- Review round 2, Fix 1: a synchronous throw from fetchImpl must degrade
+  // gracefully too, not just an async rejection. Real Node fetch (undici) can
+  // throw synchronously — e.g. Headers.append rejecting an invalid header
+  // value during Request construction — before any promise exists at all. ---
+
+  describe("synchronous fetch throw", () => {
+    it("degrades search() to an empty list when fetchImpl throws synchronously", async () => {
+      fetchMock.mockImplementation(() => {
+        throw new TypeError("Invalid value \"\\n\" for header \"User-Agent\"");
+      });
+      await expect(service.search("algiers")).resolves.toEqual([]);
+    });
+
+    it("degrades reverse() to null when fetchImpl throws synchronously", async () => {
+      fetchMock.mockImplementation(() => {
+        throw new TypeError("Invalid value \"\\n\" for header \"User-Agent\"");
+      });
+      await expect(service.reverse(36.7538, 3.0588)).resolves.toBeNull();
     });
   });
 
@@ -305,6 +354,24 @@ describe("GeocodeService", () => {
         await call;
 
         expect(capturedSignal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // Review round 2, Fix 2: nothing previously asserted that the timeout
+    // timer is actually cleared on a successful response. The service's
+    // `finally { if (timer) clearTimeout(timer); }` already does this
+    // correctly, but removing it left all other tests green — a future
+    // refactor could silently leak a timer per request. This pins the
+    // cleanup down directly via vi.getTimerCount() instead of relying on
+    // some other test noticing the leak.
+    it("clears the timeout timer once a request settles successfully, leaving no pending timers", async () => {
+      vi.useFakeTimers();
+      try {
+        expect(vi.getTimerCount()).toBe(0);
+        await service.search("algiers");
+        expect(vi.getTimerCount()).toBe(0);
       } finally {
         vi.useRealTimers();
       }

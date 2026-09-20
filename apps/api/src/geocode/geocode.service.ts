@@ -121,36 +121,44 @@ export class GeocodeService {
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const fetchPromise = this.fetchImpl(url.toString(), {
-      headers: {
-        "User-Agent": this.config.nominatimUserAgent,
-        Accept: "application/json",
-      },
-      signal: controller.signal,
-    });
-    // If the timeout below wins the race, this promise is abandoned by the code
-    // that follows but keeps running in the background — with a real fetch it
-    // eventually rejects with an AbortError once controller.abort() fires below.
-    // Without this no-op handler, that later rejection is unobserved and Node
-    // reports it as an unhandled rejection.
-    fetchPromise.catch(() => undefined);
-
-    // A race, not just an AbortSignal, is what actually bounds this call: a
-    // signal only helps if whatever produced the fetch promise is listening to
-    // it. Racing against a timer means `request()` settles on the timeout
-    // regardless of whether the underlying fetch (real or, in a test, a stub)
-    // ever notices the abort — which matters doubly now that identical
-    // concurrent callers share this same pending promise (see `inFlight`
-    // above): one stuck request must not stall every waiter behind it forever.
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-        reject(new Error(`Nominatim request timed out after ${REQUEST_TIMEOUT_MS}ms`));
-      }, REQUEST_TIMEOUT_MS);
-    });
-
     try {
+      // Deliberately inside this try: a real fetch (undici) can throw
+      // *synchronously* — e.g. Headers.append rejecting an invalid
+      // `nominatimUserAgent` value during Request construction, before any
+      // promise even exists. That must degrade like any other upstream
+      // failure, not escape as an uncaught TypeError, so the call that
+      // creates the promise has to be on the same try as the code that
+      // catches network/timeout errors below.
+      const fetchPromise = this.fetchImpl(url.toString(), {
+        headers: {
+          "User-Agent": this.config.nominatimUserAgent,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+      // If the timeout below wins the race, this promise is abandoned by the
+      // code that follows but keeps running in the background — with a real
+      // fetch it eventually rejects with an AbortError once controller.abort()
+      // fires below. Without this no-op handler, that later rejection is
+      // unobserved and Node reports it as an unhandled rejection.
+      fetchPromise.catch(() => undefined);
+
+      // A race, not just an AbortSignal, is what actually bounds this call: a
+      // signal only helps if whatever produced the fetch promise is listening
+      // to it. Racing against a timer means `request()` settles on the
+      // timeout regardless of whether the underlying fetch (real or, in a
+      // test, a stub) ever notices the abort — which matters doubly now that
+      // identical concurrent callers share this same pending promise (see
+      // `inFlight` above): one stuck request must not stall every waiter
+      // behind it forever.
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error(`Nominatim request timed out after ${REQUEST_TIMEOUT_MS}ms`));
+        }, REQUEST_TIMEOUT_MS);
+      });
+
       const response = await Promise.race([fetchPromise, timeoutPromise]);
       if (!response.ok) {
         this.logger.warn(`Nominatim returned ${response.status} for ${url.pathname}`);
