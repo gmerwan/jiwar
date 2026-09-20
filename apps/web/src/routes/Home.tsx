@@ -120,6 +120,7 @@ export function Home() {
             <NoticeMap
               notices={notices.notices}
               centre={location}
+              fallback={notices.fallback}
               onSearchArea={(centre) => setLocation(centre)}
             />
           )}

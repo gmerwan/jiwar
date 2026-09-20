@@ -107,10 +107,18 @@ function notice(overrides: Partial<NoticeWithDistance> & { publicId: string }): 
 
 const centre = { lat: 36.75, lng: 3.06 };
 
-function renderMap(notices: NoticeWithDistance[], onSearchArea = vi.fn()) {
+function renderMap(
+  notices: NoticeWithDistance[],
+  { onSearchArea = vi.fn(), fallback = false }: { onSearchArea?: () => void; fallback?: boolean } = {},
+) {
   const view = render(
     <MemoryRouter>
-      <NoticeMap notices={notices} centre={centre} onSearchArea={onSearchArea} />
+      <NoticeMap
+        notices={notices}
+        centre={centre}
+        fallback={fallback}
+        onSearchArea={onSearchArea}
+      />
     </MemoryRouter>,
   );
   return { ...view, onSearchArea };
@@ -208,5 +216,54 @@ describe("NoticeMap", () => {
 
     await user.click(screen.getByTestId("popup-close"));
     expect(screen.queryByTestId("popup")).not.toBeInTheDocument();
+  });
+
+  it("explains when the markers are a past-notice fallback", () => {
+    // Spec §6 gives the `fallback` flag so the UI "can label them honestly". The list
+    // said so; the map said nothing, and /?view=map is a shareable URL someone can
+    // land on directly -- so a funeral from weeks ago appeared as an unlabelled pin.
+    renderMap([notice({ publicId: "a", isPast: true })], { fallback: true });
+    expect(screen.getByText(/showing the most recent past notices/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about a fallback when the results are upcoming", () => {
+    renderMap([notice({ publicId: "a" })], { fallback: false });
+    expect(screen.queryByText(/showing the most recent past notices/i)).not.toBeInTheDocument();
+  });
+
+  it("marks a past notice in its popup, as the list card does", async () => {
+    const user = userEvent.setup();
+    renderMap([notice({ publicId: "a", title: "Funeral held last week", isPast: true })], {
+      fallback: true,
+    });
+
+    // Not shown before the marker is clicked: this is the popup's own signal.
+    expect(screen.queryByText(/already taken place/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("marker"));
+
+    expect(screen.getByText("Funeral held last week")).toBeInTheDocument();
+    expect(screen.getByText(/already taken place/i)).toBeInTheDocument();
+  });
+
+  it("marks a cancelled notice in its popup, and does not also call it past", async () => {
+    const user = userEvent.setup();
+    renderMap([notice({ publicId: "a", status: "cancelled", isPast: true })]);
+
+    await user.click(screen.getByTestId("marker"));
+
+    expect(screen.getByText(/has been cancelled/i)).toBeInTheDocument();
+    // Cancelled takes precedence, matching NoticeCard: one status, not two.
+    expect(screen.queryByText(/already taken place/i)).not.toBeInTheDocument();
+  });
+
+  it("does not mark an upcoming notice as past", async () => {
+    const user = userEvent.setup();
+    renderMap([notice({ publicId: "a", isPast: false })]);
+
+    await user.click(screen.getByTestId("marker"));
+
+    expect(screen.queryByText(/already taken place/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/has been cancelled/i)).not.toBeInTheDocument();
   });
 });

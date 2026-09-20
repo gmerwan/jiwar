@@ -206,6 +206,58 @@ describe("useNotices", () => {
     await waitFor(() => expect(result.current.notices.map((n) => n.publicId)).toEqual(["z"]));
   });
 
+  it("a new location starts a new query rather than reusing the previous location's rows", async () => {
+    // `lat`/`lng` are in the queryKey but were previously unasserted: dropping them
+    // left the whole suite green (measured), while dropping `radiusKm` failed. That
+    // is the Task 7 bug class -- one filter's cached page served under another -- and
+    // here it would show Algiers' notices to someone who chose Oran.
+    searchMock.mockResolvedValue(page(["algiers"], null));
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const { result, rerender } = renderHook((params: UseNoticesParams) => useNotices(params), {
+      initialProps: baseParams,
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+
+    await waitFor(() => expect(result.current.notices).toHaveLength(1));
+    expect(callArg(1).lat).toBe(36.75);
+    expect(callArg(1).lng).toBe(3.06);
+
+    searchMock.mockResolvedValue(page(["oran"], null));
+    rerender({ ...baseParams, lat: 35.6976, lng: -0.6337 });
+
+    await waitFor(() => expect(searchMock).toHaveBeenCalledTimes(2));
+    expect(callArg(2).lat).toBe(35.6976);
+    expect(callArg(2).lng).toBe(-0.6337);
+    await waitFor(() => expect(result.current.notices.map((n) => n.publicId)).toEqual(["oran"]));
+  });
+
+  it("switching between upcoming and past starts a new query rather than reusing cached rows", async () => {
+    // `when` was the other unasserted queryKey member. Reusing the upcoming cache for
+    // a past search is worse than stale: it shows future events under a "Past" filter.
+    searchMock.mockResolvedValue(page(["upcoming1"], null));
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const { result, rerender } = renderHook((params: UseNoticesParams) => useNotices(params), {
+      initialProps: baseParams,
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+
+    await waitFor(() => expect(result.current.notices).toHaveLength(1));
+    expect(callArg(1).when).toBe("upcoming");
+
+    searchMock.mockResolvedValue(page(["past1"], null));
+    rerender({ ...baseParams, when: "past" });
+
+    await waitFor(() => expect(searchMock).toHaveBeenCalledTimes(2));
+    expect(callArg(2).when).toBe("past");
+    await waitFor(() => expect(result.current.notices.map((n) => n.publicId)).toEqual(["past1"]));
+  });
+
   it("surfaces a raw network TypeError as isError, not just an ApiError", async () => {
     // Task 10's client throws a bare TypeError from fetch and a bare ZodError on
     // contract drift; neither is an ApiError, so the error path must not narrow.
