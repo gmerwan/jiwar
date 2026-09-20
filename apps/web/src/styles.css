@@ -1,0 +1,78 @@
+:root {
+  --space: 1rem;
+  --radius: 0.5rem;
+  --border: #d9d9d9;
+  --muted: #5b5b5b;
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --accent: #12674f;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --border: #3a3a3a;
+    --muted: #a8a8a8;
+    --bg: #151515;
+    --fg: #f2f2f2;
+    --accent: #4fd1a5;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.page {
+  max-inline-size: 60rem;
+  margin-inline: auto;
+  padding-inline: var(--space);
+  padding-block: var(--space);
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space);
+  margin-block-end: 0.75rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  padding-block: 0.5rem;
+  padding-inline: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  min-block-size: 2.75rem;
+}
+
+button {
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
