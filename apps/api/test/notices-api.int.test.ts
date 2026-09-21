@@ -327,44 +327,66 @@ describe("notices API", () => {
     ]);
   });
 
-  // KNOWN GAP, pinned deliberately rather than fixed here.
+  // The gap this test used to pin is now CLOSED, and this is the inversion of it.
   //
-  // The create path takes JSON, so `lat: null` arrives as a real null rather than
-  // a string — and `Number(null)` is 0 just as `Number("")` is, so the very same
-  // Null Island hazard exists on the body. `CreateNoticeSchema` accepts it:
-  // measured directly against the contract, `lat: null` and `lat: ""` both parse
-  // to `0`, while only `undefined` is rejected.
+  // It previously asserted a 201: the create path takes JSON, so `lat: null`
+  // arrives as a real null, and `Number(null)` is `0` exactly as `Number("")` is,
+  // so the Null Island hazard lived on the body as well as on the query string.
+  // Fixing it was parked at the time because `CreateNoticeSchema` is
+  // `CreateNoticeBase.refine(...)` and `.extend()` throws on a refined object, and
+  // because six consumers share the schema — a contract change to report, not to
+  // make quietly.
   //
-  // It is NOT fixed in this task, for two reasons worth recording. First, the
-  // same `.extend()` trick used for the query cannot be applied here:
-  // `CreateNoticeSchema` is `CreateNoticeBase.refine(...)`, and extending a
-  // refined object throws — measured: "Cannot overwrite keys on object schemas
-  // containing refinements. Use `.safeExtend()` instead." The alternatives are
-  // re-declaring the organizer-consent refinement on this side (a second copy of
-  // a contract rule, free to drift from the real one) or wrapping the schema in
-  // `z.looseObject({}).pipe(...)`, which collapses the Swagger request body to
-  // `{"type":"object","properties":{}}` on the input side — verified — breaking
-  // the brief's Step 8 requirement that `/api/docs` show a body schema derived
-  // from the Zod contract. Second, six tasks import this schema, and the brief was
-  // explicit that a contract change is to be reported, not made quietly.
-  //
-  // So this asserts the *current* behaviour exactly. If the contracts package
-  // later tightens `lat`/`lng`, this test fails and points at the decision rather
-  // than letting the API's meaning change unnoticed.
-  it("currently accepts a null lat on the create body, coercing it to 0 (known contract gap)", async () => {
+  // The final-review wave made that change: `LatitudeSchema`/`LongitudeSchema` now
+  // carry a `z.preprocess` that maps anything which is not a number to `undefined`,
+  // and the guards were attached with `.safeExtend()` — the very method the old
+  // comment named. Every case below returned **201** before it, planting a row at
+  // (0, 0) that a later search served as a real notice.
+  it.each([
+    ["null", null],
+    ["an empty string", ""],
+    ["false", false],
+    // Number([]) === 0, which is the case that is easiest to miss.
+    ["an empty array", []],
+  ])("rejects a create body whose lat is %s with 400, not a notice at (0, 0)", async (_label, lat) => {
     const response = await request(app.getHttpServer())
       .post("/v1/notices")
-      .send({ ...validBody, lat: null })
+      .send({ ...validBody, lat });
+
+    expect(response.status).toBe(400);
+  });
+
+  it("still publishes a notice at a genuine 0, 0", async () => {
+    // The counterfactual. Fixing the coercion must not become "reject zero": the
+    // equator and the prime meridian are real places and someone may legitimately
+    // publish there. A guard written as `if (!lat) reject` passes every case above
+    // and fails this one.
+    const response = await request(app.getHttpServer())
+      .post("/v1/notices")
+      .send({ ...validBody, lat: 0, lng: 0 })
       .expect(201);
 
     const detail = await request(app.getHttpServer())
       .get(`/v1/notices/${response.body.publicId}`)
       .expect(200);
 
-    // The notice really does land on the equator. This is the gap, stated as an
-    // assertion so it cannot be mistaken for intended behaviour.
     expect(detail.body.lat).toBe(0);
-    expect(detail.body.lng).toBe(validBody.lng);
+    expect(detail.body.lng).toBe(0);
+  });
+
+  it("still publishes a notice whose coordinates arrive as numeric strings", async () => {
+    // The other counterfactual: `z.coerce` is still underneath the preprocess, so a
+    // client that sends `"36.7538"` rather than `36.7538` keeps working.
+    const response = await request(app.getHttpServer())
+      .post("/v1/notices")
+      .send({ ...validBody, lat: String(ALGIERS.lat), lng: String(ALGIERS.lng) })
+      .expect(201);
+
+    const detail = await request(app.getHttpServer())
+      .get(`/v1/notices/${response.body.publicId}`)
+      .expect(200);
+
+    expect(detail.body.lat).toBeCloseTo(ALGIERS.lat, 4);
   });
 
   // =====================================================================
@@ -785,19 +807,68 @@ describe("notices API", () => {
     expect(after.body.items.map((i: { title: string }) => i.title)).toEqual(["Untouched"]);
   });
 
-  // KNOWN GAP, left deliberately and reported: the POST body's text fields.
+  // The other gap this file used to pin, now CLOSED and inverted.
   //
-  // A `\u0000` inside `title`/`description`/`venueName`/`address` still produces a
-  // 500. Fixing it needs the same contracts-level decision already parked with the
-  // Null Island item — `CreateNoticeSchema` is refined, so `.extend()` throws, and
-  // the wrapper alternative destroys the Swagger request body. Pinned here so the
-  // parked decision demonstrably covers it and nobody assumes it was handled.
-  it("currently returns 500 for a NUL byte in a create body field (known contract gap)", async () => {
+  // A `\u0000` in any of the body's text fields used to produce a **500**: postgres
+  // rejects NUL inside `text` at the protocol level, so binding the parameter is no
+  // defence, and the handler then logged the failing SQL plus every bound parameter
+  // — roughly 11.6 KB of log for a 4 KB body, on an unauthenticated request. It was
+  // parked for the same `.safeExtend()` reason as the Null Island item above; the
+  // final-review wave applied the guard to every free-form string in the contract.
+  it.each([
+    ["title", "title"],
+    ["description", "description"],
+    ["venueName", "venueName"],
+    ["address", "address"],
+    ["categorySlug", "categorySlug"],
+    ["organizerName", "organizerName"],
+  ])("rejects a NUL byte in the create body's %s with 400, not 500", async (_label, field) => {
     const response = await request(app.getHttpServer())
       .post("/v1/notices")
-      .send({ ...validBody, title: `Funeral prayer\u0000 for the late Ahmed Benali` });
+      .send({ ...validBody, [field]: "Funeral prayer\u0000 for the late Ahmed Benali" });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects a NUL byte in organizerContact with 400, not 500", async () => {
+    // Separated because a contact without consent is refused by the consent
+    // refinement instead, which would return 400 for the wrong reason and prove
+    // nothing about the NUL guard.
+    const response = await request(app.getHttpServer())
+      .post("/v1/notices")
+      .send({ ...validBody, organizerContact: "+213 555\u00000000", organizerConsent: true });
+
+    expect(response.status).toBe(400);
+  });
+
+  it("still accepts a clean body on that same path", async () => {
+    // The counterfactual: a guard that rejected any string, or one that broke the
+    // trimming or the `description` default, would fail here.
+    await request(app.getHttpServer()).post("/v1/notices").send(validBody).expect(201);
+  });
+
+  it("does not reach the database for a NUL byte in the body", async () => {
+    // Distinguishes "the schema rejected it" from "the insert ran and failed". A
+    // protocol-level encoding error would have disrupted the connection; the search
+    // afterwards proves the pool is intact and that no row was written.
+    const before = await testDb.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM notices`,
+    );
+
+    await request(app.getHttpServer())
+      .post("/v1/notices")
+      .send({ ...validBody, title: "Funeral prayer\u0000 for the late Ahmed Benali" })
+      .expect(400);
+
+    const after = await testDb.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM notices`,
+    );
+    expect(after[0]!.n).toBe(before[0]!.n);
+
+    await request(app.getHttpServer())
+      .get("/v1/notices")
+      .query({ lat: ALGIERS.lat, lng: ALGIERS.lng })
+      .expect(200);
   });
 
   // =====================================================================
