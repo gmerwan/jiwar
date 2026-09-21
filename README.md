@@ -30,10 +30,17 @@ Two pins in this repo are load-bearing. Both are easy to undo by accident:
 ```bash
 pnpm install
 cp .env.example .env
+# .env ships COOKIE_SECRET=CHANGE_ME, which the API refuses to boot with. Replace it:
+printf 'COOKIE_SECRET=%s\n' "$(openssl rand -base64 48)" >> .env
 pnpm build
 pnpm db:up
 cd apps/api && pnpm db:migrate && pnpm db:seed && cd ../..
 ```
+
+The `COOKIE_SECRET` line is not optional. The copied `.env` deliberately carries an
+unusable placeholder, and `loadConfig()` throws on it — see the table below for why
+a shared placeholder secret is the same thing as no authorship at all. (Appending a
+second `COOKIE_SECRET=` line is enough: later assignments win.)
 
 `pnpm build` before the first `pnpm dev` is not optional. `apps/api` and `apps/web`
 import `@jiwar/contracts` as a built package, so on a fresh clone — where
@@ -53,9 +60,17 @@ documents every variable; these are the ones without a usable default:
 | Variable | Example value | Why |
 |---|---|---|
 | `DATABASE_URL` | `postgresql://jiwar:jiwar@localhost:55432/jiwar_dev` | Matches `docker-compose.yml`. No default; the API refuses to boot without it. |
-| `COOKIE_SECRET` | `a-development-cookie-secret-that-is-at-least-32-chars` | Signs the anonymous participant cookie, which is what authorship is. No default. Must be 32+ chars. |
+| `COOKIE_SECRET` | `openssl rand -base64 48` | Signs the anonymous participant cookie, which is what authorship is. No default, must be 32+ characters, and must not be left at the `CHANGE_ME` placeholder — `loadConfig()` throws on a short or placeholder value. |
 | `WEB_ORIGIN` | `http://localhost:5173` | The CORS allow-list entry for the dev server. |
 | `COOKIE_SECURE` | `false` | Keeps the cookie working over plain HTTP locally. Set `true` in any HTTPS deployment — with an `https://` `WEB_ORIGIN` the API refuses to boot unless you do. |
+
+`COOKIE_SECRET` is enforced rather than merely documented because the signed cookie
+*is* authorship: there are no accounts, so that HMAC is the only thing stopping one
+browser cancelling another's notice. A one-character secret is recoverable offline
+from a single observed cookie, and a placeholder committed to this repository is not
+a secret at any length — either way an attacker mints a cookie for someone else's
+participant id and cancels their notice. There is no safe degraded mode for that, so
+the API declines to start.
 
 ## Running
 
@@ -91,6 +106,24 @@ They need the whole stack up. Playwright starts the Vite dev server itself (and
 reuses one already running), but **not** the API — start that first with `pnpm dev`,
 or the tests will fail at the first step with an empty category list. They write
 real notices to `jiwar_dev`, which is expected; nothing cleans up after them.
+
+### Linting
+
+**There is no linter set up**, and there is deliberately no `pnpm lint`.
+
+No eslint — or any alternative — is installed in any package, and no package
+implements a `lint` script. A `lint` task was declared in `turbo.json` with a
+matching root script, but since nothing implemented it, `turbo lint` only ever
+reported `WARNING No tasks were executed as part of this run` over three packages.
+A declared task that can never do anything is worse than an absent one: it reads as
+a quality gate that exists, and anyone who wires it into CI gets a green light from
+a command that checked nothing. Both the task and the script were removed rather
+than left as decoration.
+
+`pnpm typecheck` is what currently enforces code-level correctness, and it is
+strict (`strict` plus `noUncheckedIndexedAccess` in `tsconfig.base.json`). Choosing
+a linter and a config is an open decision for whoever picks this up — nothing in the
+build depends on one existing.
 
 ## Architecture
 

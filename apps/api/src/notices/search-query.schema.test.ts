@@ -15,14 +15,26 @@ import { SearchNoticesQuerySchema } from "./search-query.schema.js";
 describe("SearchNoticesQuerySchema blank-coordinate guard", () => {
   const origin = { lat: "36.7538", lng: "3.0588" };
 
-  it("documents the contract bug it exists to fix", () => {
-    // The shared contract, unguarded, turns an empty string into latitude 0.
-    // Recorded here so the guard's reason for existing is not lost, and so a
-    // future fix in the contracts package makes this assertion fail loudly
-    // rather than leaving a now-redundant guard in place silently.
-    const contract = SearchNoticesSchema.parse({ lat: "", lng: "3" });
-    expect(contract.lat).toBe(0);
-    expect(SearchNoticesSchema.parse({ lat: null, lng: 3 }).lat).toBe(0);
+  it("no longer needs to document a contract bug: the contract rejects blanks itself", () => {
+    // This assertion is inverted from what it originally said, and the inversion is
+    // the point. It used to record the bug — `SearchNoticesSchema.parse({ lat: "" })`
+    // returned `{ lat: 0 }` — with a note that a future fix in the contracts package
+    // should make it "fail loudly rather than leaving a now-redundant guard in place
+    // silently". The final-review wave applied that fix (a `z.preprocess` on
+    // `LatitudeSchema`/`LongitudeSchema` mapping non-numbers to `undefined`), this
+    // test duly failed, and it is rewritten here to pin the new behaviour.
+    //
+    // The local guard above is therefore no longer the *only* line of defence for a
+    // blank coordinate. It is kept deliberately rather than deleted: it is what makes
+    // the OpenAPI document and the error message describe `lat` as a required number
+    // at the HTTP boundary, and removing it is a separate decision from fixing the
+    // contract. What matters for correctness is that the two now agree — both reject
+    // — rather than one masking the other.
+    expect(SearchNoticesSchema.safeParse({ lat: "", lng: "3" }).success).toBe(false);
+    expect(SearchNoticesSchema.safeParse({ lat: null, lng: 3 }).success).toBe(false);
+    // And the contract still accepts a real zero, so the fix did not trade one
+    // wrong answer for another by outlawing the equator.
+    expect(SearchNoticesSchema.parse({ lat: 0, lng: 0 }).lat).toBe(0);
   });
 
   it.each([
