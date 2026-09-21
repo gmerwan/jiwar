@@ -45,6 +45,8 @@ export const en = {
   "notice.shared": "Link copied",
   "notice.cancel": "Cancel this notice",
   "notice.cancelConfirm": "Cancel this notice? It will no longer appear in search results.",
+  "notice.cancelForbidden":
+    "Only the browser that published this notice can cancel it. Open it on the device you published from, or ask whoever published it to cancel.",
   "notice.notFound": "This notice does not exist or has been removed.",
 
   "submit.title": "Publish a community notice",
