@@ -1,6 +1,14 @@
-import { act, cleanup, renderHook } from "@testing-library/react";
-import type { ReactNode } from "react";
-import { MemoryRouter, useLocation, useSearchParams } from "react-router-dom";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
+import { StrictMode, type ReactNode } from "react";
+import {
+  BrowserRouter,
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChosenLocation } from "./useChosenLocation.js";
 
@@ -182,6 +190,22 @@ describe("useChosenLocation URL state", () => {
     expect(renderAt("/?radiusKm=abc").result.current.radiusKm).toBe(20);
   });
 
+  it("ignores a URL radius that is not one of the offered options", () => {
+    // 150 is above the API's MAX_RADIUS_KM, which answers 400 and leaves the map
+    // blank; 7 is in range but has no <option>, so the select would show nothing.
+    expect(renderAt("/?lat=36.75&lng=3.06&radiusKm=150").result.current.radiusKm).toBe(20);
+    expect(renderAt("/?lat=36.75&lng=3.06&radiusKm=7").result.current.radiusKm).toBe(20);
+    expect(renderAt("/?lat=36.75&lng=3.06&radiusKm=100").result.current.radiusKm).toBe(100);
+  });
+
+  it("falls back to the stored radius, not the default, when the URL's is not an option", () => {
+    localStorage.setItem("jiwar.radiusKm", "50");
+    const { result } = renderWithSearch("/?lat=36.75&lng=3.06&radiusKm=150");
+    expect(result.current.chosen.radiusKm).toBe(50);
+    // ...and the link is repaired to what is shown.
+    expect(result.current.search.get("radiusKm")).toBe("50");
+  });
+
   it("keeps the URL-derived location's identity when an unrelated param changes", () => {
     // Home passes `location` to useNotices and to <NoticeMap centre>, so a fresh
     // object on every render — every view or sort switch — would look like a new
@@ -231,6 +255,23 @@ describe("useChosenLocation URL state", () => {
     expect(result.current.search.get("view")).toBe("map");
   });
 
+  it("keeps the new location when it and the radius change in the same tick on a shared link", () => {
+    // The case above can heal itself: once lat/lng are erased, the URL has no location
+    // and the stored one is copied back in. Here the URL still holds the *shared*
+    // location, so an erased write would leave the visitor looking at Algiers after
+    // they picked Oran, with nothing to repair it.
+    const { result } = renderWithSearch("/?lat=36.7538&lng=3.0588&view=map");
+    act(() => {
+      result.current.chosen.setLocation(ORAN);
+      result.current.chosen.setRadiusKm(5);
+    });
+
+    expect(result.current.search.get("lat")).toBe("35.6976");
+    expect(result.current.search.get("lng")).toBe("-0.6337");
+    expect(result.current.search.get("radiusKm")).toBe("5");
+    expect(result.current.chosen.location).toEqual(ORAN);
+  });
+
   it("keeps its setters' identity after writing to the URL", () => {
     const { result } = renderWithSearch("/?view=list");
     const before = result.current.chosen;
@@ -265,5 +306,211 @@ describe("useChosenLocation URL state", () => {
     expect(result.current.search.get("view")).toBe("map");
     expect(result.current.search.get("lat")).toBe("36.75");
     expect(result.current.search.get("radiusKm")).toBe("5");
+  });
+});
+
+describe("useChosenLocation keeps the URL in step with what is shown", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("writes a returning visitor's stored location and radius into the URL", () => {
+    localStorage.setItem("jiwar.location", JSON.stringify(ORAN));
+    localStorage.setItem("jiwar.radiusKm", "50");
+    const { result } = renderWithSearch("/?view=map&sort=nearest");
+
+    expect(result.current.chosen.location).toEqual(ORAN);
+    expect(result.current.chosen.radiusKm).toBe(50);
+    expect(result.current.search.get("lat")).toBe("35.6976");
+    expect(result.current.search.get("lng")).toBe("-0.6337");
+    expect(result.current.search.get("radiusKm")).toBe("50");
+    expect(result.current.search.get("view")).toBe("map");
+    expect(result.current.search.get("sort")).toBe("nearest");
+  });
+
+  it("writes the default radius beside a stored location that has none", () => {
+    localStorage.setItem("jiwar.location", JSON.stringify(ORAN));
+    const { result } = renderWithSearch("/?view=map");
+    expect(result.current.search.get("lat")).toBe("35.6976");
+    expect(result.current.search.get("radiusKm")).toBe("20");
+  });
+
+  it("writes the stored radius beside a location chosen in this session", () => {
+    localStorage.setItem("jiwar.radiusKm", "50");
+    const { result } = renderWithSearch("/");
+    act(() => result.current.chosen.setLocation({ lat: 36.75, lng: 3.06 }));
+    expect(result.current.search.get("lat")).toBe("36.75");
+    expect(result.current.search.get("radiusKm")).toBe("50");
+  });
+
+  it("leaves a URL that already has valid values unchanged", () => {
+    localStorage.setItem("jiwar.location", JSON.stringify(ORAN));
+    localStorage.setItem("jiwar.radiusKm", "50");
+    const url = "/?lat=36.7538&lng=3.0588&radiusKm=5&view=map";
+    const { result } = renderWithSearch(url);
+    expect(`/?${result.current.search.toString()}`).toBe(url);
+    expect(result.current.chosen.location).toEqual(ALGIERS);
+  });
+
+  it("fills in only the part the URL is missing", () => {
+    localStorage.setItem("jiwar.location", JSON.stringify(ORAN));
+    localStorage.setItem("jiwar.radiusKm", "50");
+    const { result } = renderWithSearch("/?lat=36.7538&lng=3.0588");
+    // The URL's location wins; only the radius comes from storage.
+    expect(result.current.search.get("lat")).toBe("36.7538");
+    expect(result.current.search.get("lng")).toBe("3.0588");
+    expect(result.current.search.get("radiusKm")).toBe("50");
+  });
+
+  it("does not touch storage when it copies stored values into the URL", () => {
+    localStorage.setItem("jiwar.location", JSON.stringify({ ...ORAN, label: "Oran" }));
+    localStorage.setItem("jiwar.radiusKm", "50");
+    const before = { ...localStorage };
+    const { result } = renderWithSearch("/?view=map");
+    expect(result.current.search.get("lat")).toBe("35.6976");
+    expect({ ...localStorage }).toEqual(before);
+  });
+
+  it("does not touch storage when a shared link's radius is filled in", () => {
+    localStorage.setItem("jiwar.location", JSON.stringify(ORAN));
+    const { result } = renderWithSearch("/?lat=36.7538&lng=3.0588");
+    expect(result.current.search.get("radiusKm")).toBe("20");
+    expect(localStorage.getItem("jiwar.radiusKm")).toBeNull();
+    expect(JSON.parse(localStorage.getItem("jiwar.location") ?? "null")).toEqual(ORAN);
+  });
+
+  it("ignores a stored location or radius that a link could not carry", () => {
+    // A stored value is shown on the map and copied into the URL, so it is held to the
+    // same bounds as one read from a link.
+    localStorage.setItem("jiwar.location", JSON.stringify({ lat: 91, lng: 3.06 }));
+    localStorage.setItem("jiwar.radiusKm", "150");
+    const { result } = renderWithSearch("/?view=map");
+    expect(result.current.chosen.location).toBeNull();
+    expect(result.current.chosen.radiusKm).toBe(20);
+    expect(result.current.search.toString()).toBe("view=map");
+  });
+
+  it("writes nothing while no location is shown", () => {
+    localStorage.setItem("jiwar.radiusKm", "50");
+    const { result } = renderWithSearch("/?view=map");
+    expect(result.current.chosen.location).toBeNull();
+    expect(result.current.search.toString()).toBe("view=map");
+  });
+
+  it("replaces the history entry, so Back does not gain a step", () => {
+    localStorage.setItem("jiwar.location", JSON.stringify(ORAN));
+    const app: { navigate?: (delta: number) => void; at?: string } = {};
+    function Home() {
+      useChosenLocation();
+      return null;
+    }
+    function Shell() {
+      const navigate = useNavigate();
+      const location = useLocation();
+      app.navigate = (delta) => void navigate(delta);
+      app.at = location.pathname + location.search;
+      return (
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/n/:publicId" element={<p>notice</p>} />
+        </Routes>
+      );
+    }
+    // A notice page's `<Link to="/">` back to Home.
+    render(
+      <MemoryRouter initialEntries={["/n/abc", "/?view=map"]} initialIndex={1}>
+        <Shell />
+      </MemoryRouter>,
+    );
+    expect(app.at).toBe("/?view=map&lat=35.6976&lng=-0.6337&radiusKm=20");
+
+    act(() => app.navigate?.(-1));
+    expect(app.at).toBe("/n/abc");
+  });
+
+  it("writes once, not twice, under Strict Mode", () => {
+    // Counted at the browser's own history API, because a second identical write is
+    // invisible in the rendered URL — React batches both into one render.
+    window.history.replaceState(null, "", "/?view=map");
+    localStorage.setItem("jiwar.location", JSON.stringify(ORAN));
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    try {
+      function Probe() {
+        useChosenLocation();
+        return null;
+      }
+      render(
+        <StrictMode>
+          <BrowserRouter>
+            <Probe />
+          </BrowserRouter>
+        </StrictMode>,
+      );
+      const urlWrites = replaceState.mock.calls.map((call) => call[2]).filter(Boolean);
+      expect(urlWrites).toEqual(["/?view=map&lat=35.6976&lng=-0.6337&radiusKm=20"]);
+      expect(window.location.search).toBe("?view=map&lat=35.6976&lng=-0.6337&radiusKm=20");
+    } finally {
+      replaceState.mockRestore();
+      window.history.replaceState(null, "", "/");
+    }
+  });
+});
+
+describe("useChosenLocation after the page has gone", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("does not drag the visitor back when a late geolocation fix arrives", async () => {
+    const fix: { deliver?: (p: { coords: { latitude: number; longitude: number } }) => void } = {};
+    vi.stubGlobal("navigator", {
+      geolocation: {
+        getCurrentPosition: (ok: NonNullable<typeof fix.deliver>) => {
+          fix.deliver = ok;
+        },
+      },
+    });
+
+    const app: {
+      chosen?: ReturnType<typeof useChosenLocation>;
+      navigate?: (to: string) => void;
+      at?: string;
+    } = {};
+    function Home() {
+      app.chosen = useChosenLocation();
+      return null;
+    }
+    function Shell() {
+      const navigate = useNavigate();
+      const location = useLocation();
+      app.navigate = (to) => void navigate(to);
+      app.at = location.pathname + location.search;
+      return (
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/submit" element={<p>wizard</p>} />
+        </Routes>
+      );
+    }
+    render(
+      <MemoryRouter initialEntries={["/?view=list"]}>
+        <Shell />
+      </MemoryRouter>,
+    );
+
+    let locating: Promise<void> | undefined;
+    act(() => {
+      locating = app.chosen?.requestBrowserLocation();
+    });
+    act(() => app.navigate?.("/submit"));
+    expect(app.at).toBe("/submit");
+
+    await act(async () => {
+      fix.deliver?.({ coords: { latitude: 36.75, longitude: 3.06 } });
+      await locating;
+    });
+
+    expect(app.at).toBe("/submit");
+    // The visitor did ask for this location, so it is still remembered.
+    expect(JSON.parse(localStorage.getItem("jiwar.location") ?? "null")).toEqual({
+      lat: 36.75,
+      lng: 3.06,
+    });
   });
 });
