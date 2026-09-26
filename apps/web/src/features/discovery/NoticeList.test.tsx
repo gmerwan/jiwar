@@ -90,9 +90,11 @@ describe("NoticeList", () => {
     title: "A wedding notice",
   };
 
-  // Both values of hasMore, because the failed page can turn out to be the last one:
-  // a full-page condition of `isError && !hasMore` wipes the cards then, and an inline
-  // alert gated on `hasMore` drops the error with no way to retry. Each passed 9/9.
+  // Both values of hasMore. A failed load-more cannot give hasMore: false: TanStack
+  // keeps `data` through an error, so hasNextPage stays true. The false case is a
+  // background refetch (e.g. on window focus) failing after every page has loaded.
+  // Without it, `isError && !hasMore` for the full-page error (wiping the cards) and an
+  // inline alert gated on `hasMore` (dropping the error, no retry) each passed 9/9.
   for (const hasMore of [true, false]) {
     it(`keeps already-loaded notices on screen when loading more fails (hasMore: ${hasMore})`, () => {
       renderList({ notices: [notice, secondNotice], isError: true, hasMore });
@@ -156,7 +158,7 @@ describe("NoticeList", () => {
       onRetry,
     });
 
-    // The inline error replaces the load-more button, so there is one action, not two.
+    // The load-more button is relabelled "Try again", not replaced: one action, not two.
     expect(screen.queryByRole("button", { name: /load more/i })).not.toBeInTheDocument();
 
     await userEvent.setup().click(screen.getByRole("button", { name: /try again/i }));
