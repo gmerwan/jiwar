@@ -90,16 +90,57 @@ describe("NoticeList", () => {
     title: "A wedding notice",
   };
 
-  it("keeps already-loaded notices on screen when loading more fails", () => {
-    renderList({ notices: [notice, secondNotice], isError: true, hasMore: true });
+  // Both values of hasMore, because the failed page can turn out to be the last one:
+  // a full-page condition of `isError && !hasMore` wipes the cards then, and an inline
+  // alert gated on `hasMore` drops the error with no way to retry. Each passed 9/9.
+  for (const hasMore of [true, false]) {
+    it(`keeps already-loaded notices on screen when loading more fails (hasMore: ${hasMore})`, () => {
+      renderList({ notices: [notice, secondNotice], isError: true, hasMore });
 
-    // The cards the reader was looking at are still there.
-    expect(screen.getByText("A funeral notice")).toBeInTheDocument();
-    expect(screen.getByText("A wedding notice")).toBeInTheDocument();
+      // The cards the reader was looking at are still there.
+      expect(screen.getByText("A funeral notice")).toBeInTheDocument();
+      expect(screen.getByText("A wedding notice")).toBeInTheDocument();
 
-    // And the failure is reported inline rather than replacing them.
-    expect(screen.getByRole("alert")).toHaveTextContent(/could not load more/i);
-    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+      // And the failure is reported inline rather than replacing them.
+      expect(screen.getByRole("alert")).toHaveTextContent(/could not load more/i);
+      expect(screen.queryByText(/could not load notices/i)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    }, 5_000);
+  }
+
+  it("keeps keyboard focus on the load-more button through a failure and the recovery", () => {
+    // Swapping "Load more" for a different "Try again" element removes the focused
+    // node, and focus falls back to <body>: a keyboard user who pressed Enter is sent
+    // to the top of the page. One button whose label changes keeps their place.
+    const props = { notices: [notice, secondNotice], hasMore: true };
+    const { rerender } = renderList({ ...props, isError: false });
+
+    const loadMore = screen.getByRole("button", { name: /load more/i });
+    loadMore.focus();
+    expect(loadMore).toHaveFocus();
+
+    // The load-more request fails.
+    rerender(
+      <MemoryRouter>
+        <NoticeList {...baseProps} {...props} isError={true} />
+      </MemoryRouter>,
+    );
+    const tryAgain = screen.getByRole("button", { name: /try again/i });
+    expect(tryAgain).toHaveFocus();
+    expect(tryAgain).toBe(loadMore);
+
+    // The retry succeeds: page 2's card arrives, a further page is offered, and focus
+    // is still on the same control.
+    const thirdNotice = { ...notice, publicId: "ghi789", title: "An aqiqah notice" };
+    rerender(
+      <MemoryRouter>
+        <NoticeList {...baseProps} {...props} notices={[notice, secondNotice, thirdNotice]} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("An aqiqah notice")).toBeInTheDocument();
+    const loadMoreAgain = screen.getByRole("button", { name: /load more/i });
+    expect(loadMoreAgain).toHaveFocus();
+    expect(document.activeElement).toBe(loadMore);
   }, 5_000);
 
   it("retries a failed load-more by fetching the next page, not by refetching", async () => {

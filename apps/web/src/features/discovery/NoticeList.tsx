@@ -51,22 +51,16 @@ export function NoticeList({
       {notices.map((notice) => (
         <NoticeCard key={notice.publicId} notice={notice} />
       ))}
-      {/* A failed load-more takes the button's place, so there is one action here.
-          Its retry is onLoadMore (fetchNextPage), not onRetry: refetch() re-downloads
-          the pages already loaded and never asks for the one that failed. */}
-      {isError ? (
-        <div role="alert">
-          <p>{t("discovery.loadMoreError")}</p>
-          <button type="button" onClick={onLoadMore}>
-            {t("discovery.retry")}
-          </button>
-        </div>
-      ) : (
-        hasMore && (
-          <button type="button" onClick={onLoadMore}>
-            {t("discovery.loadMore")}
-          </button>
-        )
+      {/* A failed load-more is reported inline and retried with onLoadMore
+          (fetchNextPage), not onRetry: refetch() re-downloads the pages already loaded
+          and never asks for the one that failed. It is one button whose label changes,
+          not two elements swapped: removing the focused "Load more" would drop a
+          keyboard user's focus to <body>, on the failure and again on recovery. */}
+      {isError && <p role="alert">{t("discovery.loadMoreError")}</p>}
+      {(isError || hasMore) && (
+        <button type="button" onClick={onLoadMore}>
+          {t(isError ? "discovery.retry" : "discovery.loadMore")}
+        </button>
       )}
     </div>
   );
