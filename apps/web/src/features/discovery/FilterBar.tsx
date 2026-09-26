@@ -1,5 +1,6 @@
 import type { Category } from "@jiwar/contracts";
 import { t } from "../../i18n/index.js";
+import { RADIUS_OPTIONS } from "../location/useChosenLocation.js";
 
 interface FilterBarProps {
   categories: Category[];
@@ -12,8 +13,6 @@ interface FilterBarProps {
   sort: "soonest" | "nearest";
   onSortChange: (next: "soonest" | "nearest") => void;
 }
-
-const RADIUS_OPTIONS = [5, 10, 20, 50, 100];
 
 export function FilterBar({
   categories,
