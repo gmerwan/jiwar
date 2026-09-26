@@ -27,7 +27,10 @@ export function NoticeList({
     return <p role="status">{t("discovery.loading")}</p>;
   }
 
-  if (isError) {
+  // The full-page error is only right when there is nothing to lose. TanStack Query
+  // keeps loaded pages through a failed fetchNextPage, so notices here means a page
+  // loaded, and a failed load-more must not take the reader's cards away.
+  if (isError && notices.length === 0) {
     return (
       <div role="alert">
         <p>{t("discovery.error")}</p>
@@ -48,9 +51,15 @@ export function NoticeList({
       {notices.map((notice) => (
         <NoticeCard key={notice.publicId} notice={notice} />
       ))}
-      {hasMore && (
+      {/* A failed load-more is reported inline and retried with onLoadMore
+          (fetchNextPage), not onRetry: refetch() re-downloads the pages already loaded
+          and never asks for the one that failed. It is one button whose label changes,
+          not two elements swapped: removing the focused "Load more" would drop a
+          keyboard user's focus to <body>, on the failure and again on recovery. */}
+      {isError && <p role="alert">{t("discovery.loadMoreError")}</p>}
+      {(isError || hasMore) && (
         <button type="button" onClick={onLoadMore}>
-          {t("discovery.loadMore")}
+          {t(isError ? "discovery.retry" : "discovery.loadMore")}
         </button>
       )}
     </div>
