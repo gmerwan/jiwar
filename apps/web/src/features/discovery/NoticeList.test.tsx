@@ -1,4 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { NoticeWithDistance } from "@jiwar/contracts";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -80,4 +81,61 @@ describe("NoticeList", () => {
     renderList({ notices: [notice], hasMore: false });
     expect(screen.queryAllByRole("button", { name: /load more/i })).toHaveLength(1);
   });
+
+  // A load-more that fails leaves TanStack Query's loaded pages in place and sets
+  // isError, so "notices on screen + isError" is what a failed page 2 looks like.
+  const secondNotice: NoticeWithDistance = {
+    ...notice,
+    publicId: "def456",
+    title: "A wedding notice",
+  };
+
+  it("keeps already-loaded notices on screen when loading more fails", () => {
+    renderList({ notices: [notice, secondNotice], isError: true, hasMore: true });
+
+    // The cards the reader was looking at are still there.
+    expect(screen.getByText("A funeral notice")).toBeInTheDocument();
+    expect(screen.getByText("A wedding notice")).toBeInTheDocument();
+
+    // And the failure is reported inline rather than replacing them.
+    expect(screen.getByRole("alert")).toHaveTextContent(/could not load more/i);
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+  }, 5_000);
+
+  it("retries a failed load-more by fetching the next page, not by refetching", async () => {
+    // onRetry is `refetch()`, which re-downloads the pages already loaded and never
+    // asks for the one that failed; only onLoadMore (`fetchNextPage`) requests it.
+    const onLoadMore = vi.fn();
+    const onRetry = vi.fn();
+    renderList({
+      notices: [notice, secondNotice],
+      isError: true,
+      hasMore: true,
+      onLoadMore,
+      onRetry,
+    });
+
+    // The inline error replaces the load-more button, so there is one action, not two.
+    expect(screen.queryByRole("button", { name: /load more/i })).not.toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: /try again/i }));
+
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    expect(onRetry).not.toHaveBeenCalled();
+  }, 5_000);
+
+  it("shows the full-page error only when nothing has loaded yet, and retries it with a refetch", async () => {
+    const onLoadMore = vi.fn();
+    const onRetry = vi.fn();
+    renderList({ notices: [], isError: true, onLoadMore, onRetry });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/could not load notices/i);
+    expect(screen.queryByText(/could not load more/i)).not.toBeInTheDocument();
+
+    // With no pages loaded there is no next page to fetch; a refetch is the recovery.
+    await userEvent.setup().click(screen.getByRole("button", { name: /try again/i }));
+
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(onLoadMore).not.toHaveBeenCalled();
+  }, 5_000);
 });

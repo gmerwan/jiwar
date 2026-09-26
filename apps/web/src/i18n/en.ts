@@ -21,6 +21,7 @@ export const en = {
   "discovery.fallback": "Nothing upcoming nearby. Showing the most recent past notices instead.",
   "discovery.loading": "Loading notices…",
   "discovery.error": "Could not load notices. Check your connection and try again.",
+  "discovery.loadMoreError": "Could not load more notices. Check your connection and try again.",
   "discovery.retry": "Try again",
 
   "location.useMyLocation": "Use my location",
